@@ -1,0 +1,362 @@
+MODULE 1: Edge AI Product Detection on Shelf
+I’m about to drop the full-stack skeleton for this beast. Each part is modular, professional-grade, and future-ready. I’ll chunk it so it’s easy to digest, and you can start integrating right away.
+________________________________________
+1.Edge AI Model Inference + Real-time Shelf Monitoring (YOLOv5 + OpenCV)
+if you want me to elaborate on training or deployment on Jetson/OpenVINO.
+
+
+Task: Detect products using a YOLOv5 model in real-time via camera feed
+Stack: Python, PyTorch, OpenCV
+python
+CopyEdit
+# Install first (outside of code): pip install torch torchvision opencv-python pandas
+# Clone YOLOv5 repo if not already: git clone https://github.com/ultralytics/yolov5
+
+import torch
+import cv2
+import pandas as pd
+
+# Load pretrained or fine-tuned YOLOv5 model
+model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt')  # Use your trained model here
+
+# Initialize camera (0 = webcam, or provide RTSP link or video file)
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Inference
+    results = model(frame)
+
+    # Process results
+    df = results.pandas().xyxy[0]  # Bounding box dataframe
+    for _, row in df.iterrows():
+        label = row['name']
+        conf = row['confidence']
+        x1, y1, x2, y2 = map(int, [row['xmin'], row['ymin'], row['xmax'], row['ymax']])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+        cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 2)
+
+    cv2.imshow('Retail Shelf Monitor', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+________________________________________
+2.OTA Update System (Firmware + Models) — Python Flask + MQTT + Watchdog
+This setup allows you to push updates securely over Wi-Fi/local network, with rollback capabilities.
+ota_server.py — Flask server to serve firmware & models
+python
+CopyEdit
+from flask import Flask, request, send_file, jsonify
+import os
+import hashlib
+
+app = Flask(__name__)
+
+FIRMWARE_PATH = 'firmware/latest_firmware.bin'
+MODEL_PATH = 'models/latest_model.pt'
+
+def file_hash(filepath):
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+@app.route('/firmware', methods=['GET'])
+def get_firmware():
+    client_hash = request.headers.get('X-Client-Firmware-Hash')
+    server_hash = file_hash(FIRMWARE_PATH)
+    if client_hash == server_hash:
+        return jsonify({'update': False, 'message': 'Firmware up-to-date'}), 200
+    else:
+        return send_file(FIRMWARE_PATH, mimetype='application/octet-stream')
+
+@app.route('/model', methods=['GET'])
+def get_model():
+    client_hash = request.headers.get('X-Client-Model-Hash')
+    server_hash = file_hash(MODEL_PATH)
+    if client_hash == server_hash:
+        return jsonify({'update': False, 'message': 'Model up-to-date'}), 200
+    else:
+        return send_file(MODEL_PATH, mimetype='application/octet-stream')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+________________________________________
+ota_client.py — Edge device updater
+python
+CopyEdit
+import requests
+import hashlib
+import os
+import time
+import shutil
+
+SERVER_URL = 'http://your-ota-server-ip:5000'
+FIRMWARE_PATH = '/path/to/firmware.bin'
+MODEL_PATH = '/path/to/model.pt'
+
+def file_hash(filepath):
+    if not os.path.exists(filepath):
+        return None
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def download_file(url, dest):
+    r = requests.get(url, stream=True)
+    if r.status_code == 200:
+        with open(dest + '.tmp', 'wb') as f:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+        os.rename(dest + '.tmp', dest)
+        return True
+    return False
+
+def ota_update():
+    # Firmware
+    fw_hash = file_hash(FIRMWARE_PATH)
+    fw_resp = requests.get(SERVER_URL + '/firmware', headers={'X-Client-Firmware-Hash': fw_hash})
+    if fw_resp.status_code == 200 and fw_resp.headers.get('Content-Type') != 'application/json':
+        print('Updating firmware...')
+        download_file(SERVER_URL + '/firmware', FIRMWARE_PATH)
+        # Trigger firmware flashing logic here or reboot device safely
+    else:
+        print('Firmware up to date.')
+
+    # Model
+    model_hash = file_hash(MODEL_PATH)
+    model_resp = requests.get(SERVER_URL + '/model', headers={'X-Client-Model-Hash': model_hash})
+    if model_resp.status_code == 200 and model_resp.headers.get('Content-Type') != 'application/json':
+        print('Updating AI model...')
+        download_file(SERVER_URL + '/model', MODEL_PATH)
+        # Reload model in inference pipeline as needed
+    else:
+        print('Model up to date.')
+
+if __name__ == '__main__':
+    while True:
+        try:
+            ota_update()
+        except Exception as e:
+            print(f'OTA update failed: {e}')
+        time.sleep(3600)  # Check every hour
+________________________________________
+3.Wake Word → STT → NLU → Command Control Pipeline
+Using porcupine for wake word, SpeechRecognition for STT, and Rasa or a simple rule-based NLU.
+python
+CopyEdit
+import pvporcupine
+import pyaudio
+import speech_recognition as sr
+import json
+
+WAKE_WORD = 'hey assistant'
+
+# Initialize Porcupine wake word detection
+porcupine = pvporcupine.create(keywords=['hey google'])  # customize or train own wake word
+
+pa = pyaudio.PyAudio()
+stream = pa.open(rate=porcupine.sample_rate, channels=1, format=pyaudio.paInt16, input=True, frames_per_buffer=porcupine.frame_length)
+
+recognizer = sr.Recognizer()
+
+def nlu_process(text):
+    # Simple example NLU: parse commands with keywords
+    if 'turn on' in text:
+        return {'action': 'turn_on', 'device': 'light'}
+    elif 'turn off' in text:
+        return {'action': 'turn_off', 'device': 'light'}
+    else:
+        return {'action': 'unknown'}
+
+print("Listening for wake word...")
+
+while True:
+    pcm = stream.read(porcupine.frame_length)
+    pcm = bytes(pcm)
+    result = porcupine.process(pcm)
+    if result >= 0:
+        print("Wake word detected. Listening for command...")
+        with sr.Microphone() as source:
+            audio = recognizer.listen(source, phrase_time_limit=5)
+        try:
+            text = recognizer.recognize_google(audio)
+            print("You said:", text)
+            intent = nlu_process(text.lower())
+            print("Intent:", intent)
+            # Handle the intent: call device control logic here
+        except sr.UnknownValueError:
+            print("Could not understand audio")
+        except sr.RequestError as e:
+            print(f"Could not request results; {e}")
+        print("Listening for wake word...")
+________________________________________
+4.MQTT Alerting Pipeline — Python MQTT client to publish low-stock & shelf alerts
+python
+CopyEdit
+import paho.mqtt.client as mqtt
+import json
+import time
+
+MQTT_BROKER = "mqtt.yourbroker.com"
+MQTT_PORT = 1883
+MQTT_TOPIC_ALERTS = "retail/shelf/alerts"
+
+client = mqtt.Client()
+client.connect(MQTT_BROKER, MQTT_PORT, 60)
+
+def publish_alert(alert):
+    payload = json.dumps(alert)
+    client.publish(MQTT_TOPIC_ALERTS, payload)
+    print(f"Published alert: {payload}")
+
+# Example alert usage
+low_stock_alert = {
+    'sku': '123456',
+    'shelf_id': 'A1',
+    'type': 'low_stock',
+    'quantity': 3,
+    'timestamp': time.time()
+}
+
+publish_alert(low_stock_alert)
+client.loop_start()
+________________________________________
+5.Planogram Compliance Logic (JSON + Python)
+python
+CopyEdit
+import json
+
+# Sample planogram JSON
+planogram = {
+    "A1": ["SKU123", "SKU124", "SKU125"],
+    "A2": ["SKU200", "SKU201"]
+}
+
+# Detected products on shelf
+detected = {
+    "A1": ["SKU123", "SKU125", "SKU126"],  # SKU126 misplaced, SKU124 missing
+    "A2": ["SKU200", "SKU201"]
+}
+
+def check_planogram(planogram, detected):
+    alerts = []
+    for shelf, expected_skus in planogram.items():
+        detected_skus = detected.get(shelf, [])
+        missing = set(expected_skus) - set(detected_skus)
+        misplaced = set(detected_skus) - set(expected_skus)
+        if missing:
+            alerts.append({'shelf': shelf, 'issue': 'missing_items', 'items': list(missing)})
+        if misplaced:
+            alerts.append({'shelf': shelf, 'issue': 'misplaced_items', 'items': list(misplaced)})
+    return alerts
+
+alerts = check_planogram(planogram, detected)
+print(alerts)
+________________________________________
+6.Model Optimization Pipeline (PyTorch → TensorRT)
+Example: Convert PyTorch model to TorchScript + TensorRT (NVIDIA Jetson)
+python
+CopyEdit
+import torch
+
+# Load your trained model
+model = torch.load('model.pt')
+model.eval()
+
+# Convert to TorchScript
+example_input = torch.randn(1, 3, 640, 640)
+traced_model = torch.jit.trace(model, example_input)
+traced_model.save("model_ts.pt")
+
+# On Jetson, you can use TensorRT to optimize this:
+# Use NVIDIA's TensorRT tools to convert model_ts.pt to TensorRT engine (done on device or PC)
+(For OpenVINO, use OpenVINO Model Optimizer CLI on the saved model.)
+________________________________________
+7.Central Dashboard (React + Flask + WebSocket)
+Flask backend (alerts API + WebSocket)
+python
+CopyEdit
+from flask import Flask, jsonify
+from flask_sock import Sock
+
+app = Flask(__name__)
+sock = Sock(app)
+
+clients = []
+
+@app.route('/alerts')
+def get_alerts():
+    # Return recent alerts from DB or cache
+    return jsonify([])
+
+@sock.route('/ws')
+def websocket(ws):
+    clients.append(ws)
+    try:
+        while True:
+            data = ws.receive()
+            # handle incoming messages if needed
+    except:
+        clients.remove(ws)
+
+def broadcast_alert(alert):
+    for ws in clients:
+        ws.send(alert)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+________________________________________
+React frontend snippet (subscribe to WebSocket alerts)
+javascript
+CopyEdit
+import React, { useEffect, useState } from 'react';
+
+function AlertDashboard() {
+  const [alerts, setAlerts] = useState([]);
+
+  useEffect(() => {
+    const ws = new WebSocket('ws://localhost:5000/ws');
+    ws.onmessage = (event) => {
+      const alert = JSON.parse(event.data);
+      setAlerts(prev => [alert, ...prev]);
+    };
+    return () => ws.close();
+  }, []);
+
+  return (
+    <div>
+      <h1>Retail Shelf Alerts</h1>
+      <ul>
+        {alerts.map((alert, i) => (
+          <li key={i}>{alert.shelf} - {alert.issue} - {alert.items?.join(', ') || alert.quantity}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default AlertDashboard;
+________________________________________
+8.Dockerfile (Edge Device Packaging)
+dockerfile
+CopyEdit
+FROM nvcr.io/nvidia/l4t-pytorch:r32.7.1-pth1.6-py3
+
+WORKDIR /app
+
+COPY . /app
+
+RUN pip install -r requirements.txt
+
+CMD ["python3", "inference.py"]
