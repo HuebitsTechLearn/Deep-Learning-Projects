@@ -1,0 +1,455 @@
+Code Modules for Predictive Maintenance Using Edge AI
+1. Sensor Data Collection (Edge - Raspberry Pi / Jetson Nano)
+python
+CopyEdit
+# sensor_data_collector.py
+import time
+import board
+import adafruit_dht
+import numpy as np
+import paho.mqtt.client as mqtt
+
+dhtDevice = adafruit_dht.DHT22(board.D4)  # example for temperature/humidity
+client = mqtt.Client()
+client.connect("broker.hivemq.com", 1883)
+
+while True:
+    try:
+        temp_c = dhtDevice.temperature
+        humidity = dhtDevice.humidity
+        payload = f"{temp_c},{humidity}"
+        client.publish("machine/data", payload)
+    except RuntimeError:
+        continue
+    time.sleep(2)
+________________________________________
+2. Edge AI Model (Anomaly Detection with Isolation Forest)
+python
+CopyEdit
+# edge_inference.py
+import joblib
+import numpy as np
+from sklearn.ensemble import IsolationForest
+
+# Load model
+model = joblib.load("isolation_forest_model.pkl")
+
+# Simulate new sensor reading
+sensor_data = np.array([[0.76, 32.5, 65]])  # Vibration, Temp, Humidity
+anomaly = model.predict(sensor_data)
+
+if anomaly[0] == -1:
+    print("Anomaly Detected: Schedule maintenance!")
+________________________________________
+3. Model Training (Python, Jupyter Notebook)
+python
+CopyEdit
+# train_model.py
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+import joblib
+
+df = pd.read_csv("sensor_data.csv")
+features = df[["vibration", "temperature", "humidity"]]
+
+model = IsolationForest(n_estimators=100, contamination=0.05)
+model.fit(features)
+
+joblib.dump(model, "isolation_forest_model.pkl")
+print("Model saved successfully!")
+________________________________________
+4. MQTT to Cloud & Dashboard Integration
+python
+CopyEdit
+# mqtt_to_dashboard.py
+import paho.mqtt.client as mqtt
+import json
+import requests
+
+def on_message(client, userdata, msg):
+    data = msg.payload.decode()
+    vibration, temp, hum = map(float, data.split(","))
+    alert = {
+        "vibration": vibration,
+        "temperature": temp,
+        "humidity": hum,
+        "status": "ok" if vibration < 0.8 else "alert"
+    }
+    requests.post("https://your-cloud-api.com/ingest", json=alert)
+
+client = mqtt.Client()
+client.connect("broker.hivemq.com", 1883)
+client.subscribe("machine/data")
+client.on_message = on_message
+client.loop_forever()
+
+
+
+Phase 2: Hardware Setup
+Components
+Component	Example
+Edge Device	Raspberry Pi 4 / Jetson Nano
+Vibration Sensor	ADXL345 / MPU6050
+Temp Sensor	DS18B20 / MAX6675 (thermocouple)
+Acoustic Sensor	KY-037 / Analog mic
+Current Sensor	ACS712
+________________________________________
+Connections
+Example: Connect ADXL345 to Raspberry Pi via I2C
+bash
+CopyEdit
+sudo raspi-config  # Enable I2C
+sudo apt install -y python3-smbus i2c-tools
+i2cdetect -y 1     # Check sensor address
+Python Code: Read ADXL345
+python
+CopyEdit
+import smbus
+import time
+
+bus = smbus.SMBus(1)
+address = 0x53  # Confirm with i2cdetect
+
+# Power on
+bus.write_byte_data(address, 0x2D, 0x08)
+
+def read_axis(axis):
+    reg = {'x': 0x32, 'y': 0x34, 'z': 0x36}[axis]
+    low = bus.read_byte_data(address, reg)
+    high = bus.read_byte_data(address, reg+1)
+    val = ((high << 8) | low)
+    return val - 65536 if val > 32767 else val
+
+while True:
+    print("X:", read_axis('x'), "Y:", read_axis('y'), "Z:", read_axis('z'))
+    time.sleep(0.5)
+________________________________________
+Phase 3: Edge AI & Data Pipeline
+1. Data Preprocessing Script (Edge)
+python
+CopyEdit
+import numpy as np
+def extract_features(data):
+    return {
+        "mean": np.mean(data),
+        "std": np.std(data),
+        "max": np.max(data),
+        "min": np.min(data),
+        "kurtosis": np.mean((data - np.mean(data))**4) / (np.std(data)**4)
+    }
+2. ML Model (Train Offline with Historical Data)
+python
+CopyEdit
+from sklearn.ensemble import IsolationForest
+import joblib
+
+# X: array of extracted features
+model = IsolationForest(n_estimators=100, contamination=0.05)
+model.fit(X_train)
+joblib.dump(model, 'anomaly_model.pkl')
+3. Edge Inference Code
+python
+CopyEdit
+import joblib
+model = joblib.load('anomaly_model.pkl')
+
+def is_anomaly(features):
+    feature_array = np.array(list(features.values())).reshape(1, -1)
+    return model.predict(feature_array)[0] == -1  # -1 = anomaly
+________________________________________
+Phase 4: Edge to Cloud Communication
+MQTT Publisher (Edge Device)
+python
+CopyEdit
+import paho.mqtt.client as mqtt
+import json
+
+client = mqtt.Client()
+client.connect("broker.hivemq.com", 1883, 60)
+
+data = {"machine_id": "motor01", "anomaly": True}
+client.publish("factory/predictive_maintenance", json.dumps(data))
+________________________________________
+Phase 5: Cloud Dashboard with Grafana + InfluxDB
+Install InfluxDB + Grafana (on cloud or local server)
+bash
+CopyEdit
+sudo docker run -d --name=influxdb -p 8086:8086 influxdb
+sudo docker run -d --name=grafana -p 3000:3000 grafana/grafana
+Configure:
+•	InfluxDB for time-series storage
+•	Grafana for visualization
+•	Build dashboard for:
+o	Sensor trends
+o	Anomaly counts
+o	Machine health index
+________________________________________
+Phase 6: Alerting System (Optional with Twilio)
+Python Alert Code
+python
+CopyEdit
+from twilio.rest import Client
+
+def send_alert(msg):
+    account_sid = 'ACXXXX'
+    auth_token = 'your_token'
+    client = Client(account_sid, auth_token)
+
+    client.messages.create(
+        to="+91XXXXXXXXXX",
+        from_="+1XXXXXXX",
+        body=msg
+    )
+________________________________________
+BONUS: Full Folder Structure
+CopyEdit
+predictive_maintenance/
+│
+├── edge/
+│   ├── sensor_read.py
+│   ├── preprocess.py
+│   ├── infer.py
+│   └── mqtt_publisher.py
+│
+├── ml/
+│   ├── train_model.ipynb
+│   └── anomaly_model.pkl
+│
+├── dashboard/
+│   ├── grafana_setup/
+│   └── influx_setup/
+│
+├── alerts/
+│   └── twilio_alert.py
+│
+└── README.md
+
+
+
+
+Sensor Interfacing — The Frontline
+Goal: Read raw data from sensors on your edge device (e.g., Raspberry Pi).
+Step 1: Setup your Raspberry Pi
+•	Install Raspbian OS or Ubuntu
+•	Enable I2C and SPI interfaces (for sensors like accelerometers)
+bash
+CopyEdit
+sudo raspi-config
+# Navigate to Interface Options → Enable I2C and SPI → Reboot
+Step 2: Install dependencies
+bash
+CopyEdit
+sudo apt update && sudo apt install -y python3-pip i2c-tools
+pip3 install smbus2 numpy
+Step 3: Connect an accelerometer (e.g., ADXL345) via I2C
+•	SDA to GPIO 2 (Pin 3)
+•	SCL to GPIO 3 (Pin 5)
+•	VCC to 3.3V (Pin 1)
+•	GND to GND (Pin 6)
+Step 4: Detect sensor
+bash
+CopyEdit
+i2cdetect -y 1
+# Should show 0x53 or 0x1D address depending on sensor variant
+Step 5: Python script to read raw accelerometer data
+python
+CopyEdit
+import smbus2
+import time
+
+bus = smbus2.SMBus(1)
+address = 0x53
+
+# Initialize ADXL345
+bus.write_byte_data(address, 0x2D, 0x08)  # Power control register to start measurements
+
+def read_word(reg):
+    low = bus.read_byte_data(address, reg)
+    high = bus.read_byte_data(address, reg+1)
+    val = (high << 8) + low
+    return val - 65536 if val > 32767 else val
+
+while True:
+    x = read_word(0x32)
+    y = read_word(0x34)
+    z = read_word(0x36)
+    print(f"X: {x}, Y: {y}, Z: {z}")
+    time.sleep(0.5)
+This reads raw acceleration on X, Y, Z axes every 0.5 seconds.
+________________________________________
+Feature Extraction & Data Logger — Making Sense of Raw Data
+Goal: Convert raw sensor readings into meaningful features, save data for later model training.
+Step 1: Collect sensor data and extract features like mean, std, kurtosis
+python
+CopyEdit
+import numpy as np
+import time
+from collections import deque
+
+window_size = 50  # Number of samples to consider for feature extraction
+data_x, data_y, data_z = deque(maxlen=window_size), deque(maxlen=window_size), deque(maxlen=window_size)
+
+def extract_features(window):
+    arr = np.array(window)
+    features = {
+        "mean": np.mean(arr),
+        "std": np.std(arr),
+        "max": np.max(arr),
+        "min": np.min(arr),
+        "kurtosis": np.mean((arr - np.mean(arr))**4) / (np.std(arr)**4)
+    }
+    return features
+
+while True:
+    # Collect raw data (use the sensor reading function from previous phase)
+    x, y, z = read_word(0x32), read_word(0x34), read_word(0x36)
+    data_x.append(x)
+    data_y.append(y)
+    data_z.append(z)
+
+    if len(data_x) == window_size:
+        features_x = extract_features(data_x)
+        features_y = extract_features(data_y)
+        features_z = extract_features(data_z)
+
+        # Combine features into a single vector
+        feature_vector = {
+            'x_mean': features_x['mean'],
+            'x_std': features_x['std'],
+            'x_max': features_x['max'],
+            'x_min': features_x['min'],
+            'x_kurtosis': features_x['kurtosis'],
+            'y_mean': features_y['mean'],
+            'y_std': features_y['std'],
+            'y_max': features_y['max'],
+            'y_min': features_y['min'],
+            'y_kurtosis': features_y['kurtosis'],
+            'z_mean': features_z['mean'],
+            'z_std': features_z['std'],
+            'z_max': features_z['max'],
+            'z_min': features_z['min'],
+            'z_kurtosis': features_z['kurtosis'],
+        }
+
+        print(feature_vector)
+
+        # Log to CSV file
+        with open("sensor_features.csv", "a") as f:
+            f.write(",".join(str(v) for v in feature_vector.values()) + "\n")
+
+    time.sleep(0.1)
+Run this and collect data over different operating conditions (normal vs. faulty).
+________________________________________
+ML Model Training — Teaching the Machine to Predict Failures
+Goal: Use collected feature data to train an anomaly detection model offline.
+Step 1: Prepare your dataset
+•	Use your sensor_features.csv
+•	Label data if you have known failures (optional for supervised)
+Step 2: Training Isolation Forest for anomaly detection
+python
+CopyEdit
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+from sklearn.model_selection import train_test_split
+import joblib
+
+# Load data
+df = pd.read_csv("sensor_features.csv", header=None)
+X = df.values
+
+# Train/test split (if labeled, separate normal vs anomaly data)
+X_train, X_test = train_test_split(X, test_size=0.2, random_state=42)
+
+# Train model
+model = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+model.fit(X_train)
+
+# Save model
+joblib.dump(model, "anomaly_model.pkl")
+
+# Optional: Evaluate
+y_pred = model.predict(X_test)
+print("Anomalies detected:", sum(y_pred == -1))
+________________________________________
+Edge Deployment — Real-time Anomaly Detection on Device
+Goal: Deploy your trained model to edge device, make real-time predictions.
+Step 1: Install dependencies on edge device
+bash
+CopyEdit
+pip3 install joblib scikit-learn numpy
+Step 2: Inference script
+python
+CopyEdit
+import joblib
+import numpy as np
+
+model = joblib.load("anomaly_model.pkl")
+
+def predict_anomaly(feature_vector):
+    features = np.array(list(feature_vector.values())).reshape(1, -1)
+    prediction = model.predict(features)
+    return prediction[0] == -1  # True if anomaly
+
+# Use your feature extraction from phase 2
+while True:
+    # Extract features from latest window of sensor data
+    # feature_vector = {...} (from phase 2)
+    anomaly = predict_anomaly(feature_vector)
+    if anomaly:
+        print("Anomaly Detected! 🚨")
+    else:
+        print("System Normal")
+________________________________________
+Cloud Dashboard — Visualize and Monitor
+Goal: Store anomaly reports & sensor features on cloud DB, visualize trends and alerts.
+Step 1: Setup MQTT Broker (e.g., HiveMQ, Mosquitto)
+bash
+CopyEdit
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl enable mosquitto
+sudo systemctl start mosquitto
+Step 2: Publish anomaly alerts from edge device
+python
+CopyEdit
+import paho.mqtt.client as mqtt
+import json
+
+client = mqtt.Client()
+client.connect("localhost", 1883, 60)  # Or cloud broker IP
+
+def publish_alert(feature_vector, anomaly):
+    data = {"features": feature_vector, "anomaly": anomaly}
+    client.publish("factory/machinery/anomaly", json.dumps(data))
+
+# Call this after prediction
+publish_alert(feature_vector, anomaly)
+Step 3: Setup InfluxDB + Grafana for timeseries
+bash
+CopyEdit
+# Docker commands (run locally or cloud)
+docker run -d --name=influxdb -p 8086:8086 influxdb
+docker run -d --name=grafana -p 3000:3000 grafana/grafana
+•	Configure Grafana to connect to InfluxDB
+•	Build dashboard with anomaly metrics, sensor data charts
+________________________________________
+SMS/Email Alerting — Keep Your Team Notified
+Step 1: Setup Twilio account
+•	Get account SID, auth token, and phone number
+Step 2: Python alert script
+python
+CopyEdit
+from twilio.rest import Client
+
+def send_sms_alert(message):
+    account_sid = "your_account_sid"
+    auth_token = "your_auth_token"
+    client = Client(account_sid, auth_token)
+    client.messages.create(
+        body=message,
+        from_='+1XXXXXX',  # Your Twilio number
+        to='+91YYYYYYY'    # Recipient number
+    )
+
+# Use this function when anomaly detected
+send_sms_alert("Alert! Anomaly detected on Motor 01")
+
