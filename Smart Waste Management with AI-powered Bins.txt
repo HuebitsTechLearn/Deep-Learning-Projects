@@ -1,0 +1,502 @@
+
+model_training/train_model.py
+python
+CopyEdit
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import os
+
+# Paths to your dataset directories
+train_dir = 'dataset/train'
+val_dir = 'dataset/val'
+
+# Image size and batch size
+img_size = (128, 128)
+batch_size = 32
+
+# Data augmentation for training
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    zoom_range=0.2,
+    horizontal_flip=True
+)
+val_datagen = ImageDataGenerator(rescale=1./255)
+
+# Flow images from directories
+train_gen = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=img_size,
+    batch_size=batch_size,
+    class_mode='categorical'
+)
+
+val_gen = val_datagen.flow_from_directory(
+    val_dir,
+    target_size=img_size,
+    batch_size=batch_size,
+    class_mode='categorical'
+)
+
+# Simple CNN model
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 3)),
+    MaxPooling2D(2, 2),
+    Conv2D(64, (3, 3), activation='relu'),
+    MaxPooling2D(2, 2),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dropout(0.4),
+    Dense(train_gen.num_classes, activation='softmax')
+])
+
+# Compile the model
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model
+model.fit(train_gen, validation_data=val_gen, epochs=15)
+
+# Save the Keras model
+os.makedirs("model_output", exist_ok=True)
+model.save("model_output/waste_classifier.h5")
+
+# Convert to TensorFlow Lite model
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+tflite_model = converter.convert()
+
+# Save the TFLite model
+with open("model_output/waste_classifier.tflite", "wb") as f:
+    f.write(tflite_model)
+
+print("Model training and conversion complete.")
+
+
+On-Device Inference + AR Overlay Logic, where the magic happens inside the bin — no cloud needed.
+We’ll use TensorFlow Lite for on-device AI inference and OpenCV for basic camera feed handling and AR overlay. This is ideal for a Raspberry Pi (or any embedded Linux device). Here’s your full Python script for real-time object classification and overlay visualization:
+________________________________________
+edge_inference/waste_classifier_inference.py
+python
+CopyEdit
+import cv2
+import numpy as np
+import tflite_runtime.interpreter as tflite
+import time
+
+# Labels (edit these to match your dataset)
+labels = ['Plastic', 'Organic', 'Glass', 'General']
+
+# Load TFLite model
+interpreter = tflite.Interpreter(model_path="waste_classifier.tflite")
+interpreter.allocate_tensors()
+
+# Input/output details
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+height = input_details[0]['shape'][1]
+width = input_details[0]['shape'][2]
+
+# Camera setup (adjust index if needed)
+cap = cv2.VideoCapture(0)
+
+def preprocess(frame):
+    img = cv2.resize(frame, (width, height))
+    img = np.expand_dims(img, axis=0)
+    img = img.astype(np.float32) / 255.0
+    return img
+
+def predict(img):
+    interpreter.set_tensor(input_details[0]['index'], img)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    prediction = np.argmax(output_data[0])
+    confidence = output_data[0][prediction]
+    return labels[prediction], confidence
+
+print("Starting real-time inference...")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    img = preprocess(frame)
+    label, conf = predict(img)
+
+    # AR overlay
+    cv2.putText(frame, f"{label} ({conf*100:.1f}%)", (30, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+    cv2.rectangle(frame, (20, 20), (400, 60), (0, 255, 0), 2)
+
+    cv2.imshow("Smart Bin - Waste Type Recognition", frame)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+________________________________________
+Notes:
+•	This script runs in real-time, capturing frames from a connected USB camera.
+•	You’ll see an AR-like overlay with the predicted waste category and confidence.
+•	The model is tiny, so it runs on most low-power boards like Raspberry Pi Zero 2 W, Jetson Nano, etc.
+•	You can modify it to send alerts or log classifications locally/on MQTT.
+the Mobile App Integration phase — the interface where your smart bin’s brain meets the user’s world, on Android and iOS. We’ll build a Unity + AR Foundation app that captures live camera feed, runs on-device inference, and overlays the waste classification in real-time AR.
+________________________________________
+Why Unity + AR Foundation?
+•	Cross-platform (iOS + Android) — one codebase.
+•	Access to ARKit (iOS) & ARCore (Android) under the hood.
+•	Smooth integration for camera feed, overlays, and ML models.
+________________________________________
+Step 1: Setup Unity Project
+1.	Create a new Unity 3D project.
+2.	Import AR Foundation, ARCore XR Plugin, and ARKit XR Plugin from Unity Package Manager.
+3.	Import TensorFlow Lite Unity Plugin (you can grab it from GitHub or Unity Asset Store) to run your model on-device.
+________________________________________
+Step 2: Basic Scene Setup with AR Session
+•	Create a new scene with:
+plaintext
+CopyEdit
+AR Session (GameObject)
+AR Session Origin (GameObject)
+    └── AR Camera (Child of AR Session Origin)
+________________________________________
+Step 3: Script to Run On-Device Inference and Overlay Text
+Here’s a simplified Unity C# script that:
+•	Captures camera frames
+•	Runs your TFLite waste classification model
+•	Displays overlay text in AR
+________________________________________
+Assets/Scripts/WasteClassifierAR.cs
+csharp
+CopyEdit
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using UnityEngine.XR.ARFoundation;
+using TensorFlowLite;
+
+public class WasteClassifierAR : MonoBehaviour
+{
+    [SerializeField] private ARCameraManager cameraManager;
+    [SerializeField] private Text labelText;
+
+    private Interpreter interpreter;
+    private float[,,] input;
+    private float[] output;
+
+    private readonly string[] labels = { "Plastic", "Organic", "Glass", "General" };
+
+    void Start()
+    {
+        // Load your TFLite model here (place your .tflite file under StreamingAssets)
+        var modelPath = System.IO.Path.Combine(Application.streamingAssetsPath, "waste_classifier.tflite");
+        interpreter = new Interpreter(File.ReadAllBytes(modelPath));
+        interpreter.AllocateTensors();
+
+        var inputShape = interpreter.GetInputTensorInfo(0).shape;
+        input = new float[inputShape[1], inputShape[2], inputShape[3]];
+        output = new float[interpreter.GetOutputTensorInfo(0).shape[1]];
+    }
+
+    void OnDisable()
+    {
+        interpreter.Dispose();
+    }
+
+    void Update()
+    {
+        if (!cameraManager.TryAcquireLatestCpuImage(out var image))
+            return;
+
+        // Convert image to texture2D & preprocess here (resize, normalize)
+        Texture2D texture = ConvertCpuImageToTexture2D(image);
+        image.Dispose();
+
+        // Prepare input (simplified; adapt for your model)
+        Color32[] pixels = texture.GetPixels32();
+        for (int y = 0; y < texture.height; y++)
+        {
+            for (int x = 0; x < texture.width; x++)
+            {
+                var color = pixels[y * texture.width + x];
+                input[y, x, 0] = color.r / 255f;
+                input[y, x, 1] = color.g / 255f;
+                input[y, x, 2] = color.b / 255f;
+            }
+        }
+
+        interpreter.SetInputTensorData(0, input);
+        interpreter.Invoke();
+        interpreter.GetOutputTensorData(0, output);
+
+        int maxIndex = 0;
+        float maxProb = 0f;
+        for (int i = 0; i < output.Length; i++)
+        {
+            if (output[i] > maxProb)
+            {
+                maxProb = output[i];
+                maxIndex = i;
+            }
+        }
+
+        labelText.text = $"{labels[maxIndex]} ({maxProb * 100f:0.0}%)";
+    }
+
+    Texture2D ConvertCpuImageToTexture2D(UnityEngine.XR.ARSubsystems.XRCpuImage image)
+    {
+        // Convert CPU Image to Texture2D (implementation depends on Unity version)
+        // Placeholder for brevity
+        return new Texture2D(224, 224); // Change to actual conversion logic
+    }
+}
+________________________________________
+Step 4: UI Setup
+•	Create a Canvas with a Text UI element to display the predicted waste type and confidence percentage.
+•	Link the labelText in the script to this Text UI.
+•	Link the AR Camera Manager from the scene to the cameraManager field in the script inspector.
+________________________________________
+Step 5: Build & Deploy
+•	Set Player Settings for Android/iOS with AR support.
+•	Deploy to device and test. You’ll get live AR classification overlay on the camera feed.
+________________________________________
+Pro Tips:
+•	Optimize image preprocessing with Unity's native texture conversions.
+•	Use model quantization to speed up inference on mobile CPUs.
+•	Add bounding boxes or AR markers over detected waste if using an object detection model.
+•	Include power-saving strategies to maximize battery life.
+
+
+We’re diving deep into Model Optimization for Mobile AR — the kind of wizardry that turns bulky, sluggish AI models into razor-fast, pocket-sized powerhouses.
+________________________________________
+Why Optimize?
+Raw models? Heavy, power-hungry, and a nightmare on mobile. Optimized models? Lean, mean, lightning-quick — perfect for real-time AR on a smartphone without frying the battery or lagging the user.
+________________________________________
+1. Quantization: Shrinking Numbers, Boosting Speed
+•	What is it?
+Convert your model’s weights and activations from 32-bit floating point (float32) to 8-bit integers (int8) or 16-bit floats (float16). This reduces size & speeds up inference with almost no accuracy loss.
+•	Types of quantization:
+o	Post-training quantization (easiest to apply after model training)
+o	Quantization-aware training (trickier, but preserves accuracy better)
+•	Tools:
+TensorFlow Lite supports all this magic — just a few lines of config and boom, smaller model.
+________________________________________
+2. Pruning: Cut the Fat, Keep the Muscle
+•	What is it?
+Systematically remove less important connections or neurons from your neural network during or after training.
+•	Why?
+Slimmer models, fewer computations, better speed, less memory.
+•	Trade-off:
+If you prune too aggressively, accuracy drops. Balance is key.
+________________________________________
+3. Conversion to TensorFlow Lite Format
+•	Convert your TensorFlow or Keras model to .tflite format optimized for mobile.
+python
+CopyEdit
+import tensorflow as tf
+
+converter = tf.lite.TFLiteConverter.from_saved_model('saved_model_dir')
+
+# Post-training quantization
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+tflite_model = converter.convert()
+
+with open('model_quantized.tflite', 'wb') as f:
+    f.write(tflite_model)
+________________________________________
+4. Benchmarking & Testing
+•	Use TensorFlow Lite Benchmark Tool on your target device to measure latency, CPU & memory.
+•	Adjust quantization/pruning levels to hit your sweet spot of speed vs accuracy.
+________________________________________
+5. Advanced: Delegate Usage for Hardware Acceleration
+•	Enable delegates like GPU Delegate or NNAPI Delegate to offload AI tasks to specialized hardware on mobile (Android/iOS).
+•	This cuts latency drastically.
+________________________________________
+Corporate-Jargon Spice:
+By strategically implementing quantization and pruning within the TensorFlow Lite ecosystem, we unlock a highly scalable, edge-optimized inferencing pipeline — ensuring our AR-enabled smart bin app delivers an immersive, ultra-responsive user experience, all while maintaining lean computational overhead and maximizing battery longevity. This aligns perfectly with enterprise goals of sustainable, high-performance IoT deployments.
+
+
+full-stack flex with CI/CD, slick AR UI/UX, and bulletproof cloud sync with privacy baked in. Let’s get into it.
+________________________________________
+Full CI/CD Pipeline for Model Updates (Edge AI Focus)
+yaml
+CopyEdit
+# ci-cd-pipeline.yml (GitHub Actions example)
+
+name: Edge AI Model CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt tensorflow tensorflow-model-optimization tflite-runtime
+
+    - name: Train model
+      run: |
+        python train_waste_classification_model.py --epochs 30 --batch-size 32
+
+    - name: Optimize model (Quantization)
+      run: |
+        python optimize_model.py --input-model=model.h5 --output-model=model_quant.tflite
+
+    - name: Upload optimized model as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: optimized-model
+        path: model_quant.tflite
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Download optimized model artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: optimized-model
+
+    - name: Deploy model to device fleet (example using AWS IoT)
+      run: |
+        aws s3 cp model_quant.tflite s3://smart-waste-models/latest/model_quant.tflite
+        aws iot update-thing-shadow --thing-name "SmartWasteBin" --payload '{"state":{"desired":{"modelVersion":"latest"}}}'
+This pipeline trains, optimizes, and deploys models seamlessly — pushing the latest edge AI to bins with minimal manual intervention.
+________________________________________
+Advanced UI/UX for AR Overlay & Analytics (React + Three.js + D3.js)
+jsx
+CopyEdit
+// AROverlay.jsx
+import React, { useRef, useEffect } from 'react';
+import * as THREE from 'three';
+
+export default function AROverlay({ detectedObjects }) {
+  const mountRef = useRef();
+
+  useEffect(() => {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    mountRef.current.appendChild(renderer.domElement);
+
+    // Light
+    const light = new THREE.AmbientLight(0xffffff);
+    scene.add(light);
+
+    // Create bounding boxes & labels for detected objects
+    detectedObjects.forEach(obj => {
+      const geometry = new THREE.BoxGeometry(obj.width, obj.height, obj.depth);
+      const material = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+      const box = new THREE.Mesh(geometry, material);
+      box.position.set(obj.x, obj.y, obj.z);
+      scene.add(box);
+    });
+
+    camera.position.z = 5;
+
+    const animate = () => {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    return () => {
+      mountRef.current.removeChild(renderer.domElement);
+    };
+  }, [detectedObjects]);
+
+  return <div ref={mountRef} style={{ position: 'absolute', top: 0, left: 0 }} />;
+}
+jsx
+CopyEdit
+// AnalyticsDashboard.jsx
+import React from 'react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+
+const data = [
+  { time: '8 AM', fillLevel: 20 },
+  { time: '10 AM', fillLevel: 45 },
+  { time: '12 PM', fillLevel: 70 },
+  { time: '2 PM', fillLevel: 90 },
+];
+
+export default function AnalyticsDashboard() {
+  return (
+    <ResponsiveContainer width="100%" height={300}>
+      <LineChart data={data}>
+        <XAxis dataKey="time" />
+        <YAxis />
+        <Tooltip />
+        <Legend />
+        <Line type="monotone" dataKey="fillLevel" stroke="#82ca9d" />
+      </LineChart>
+  </ResponsiveContainer>
+  );
+}
+The overlay visualizes real-time detection in 3D AR space, while the dashboard plots fill levels over time for data-driven decision-making.
+________________________________________
+Secure Cloud Sync with Data Privacy (AWS IoT + TLS + Encryption)
+python
+CopyEdit
+# device_data_publisher.py
+import paho.mqtt.client as mqtt
+import ssl
+import json
+import time
+
+MQTT_BROKER = "your-aws-endpoint.iot.region.amazonaws.com"
+MQTT_PORT = 8883
+THING_NAME = "SmartWasteBin001"
+
+# Paths to certificates
+CA_PATH = "root-CA.crt"
+CERT_PATH = "device-certificate.pem.crt"
+KEY_PATH = "private.pem.key"
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
+
+client = mqtt.Client(client_id=THING_NAME)
+client.tls_set(ca_certs=CA_PATH,
+               certfile=CERT_PATH,
+               keyfile=KEY_PATH,
+               tls_version=ssl.PROTOCOL_TLSv1_2)
+client.on_connect = on_connect
+
+client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+client.loop_start()
+
+def publish_bin_data(fill_level, waste_type, alert):
+    payload = {
+        "fill_level": fill_level,
+        "waste_type": waste_type,
+        "alert": alert,
+        "timestamp": int(time.time())
+    }
+    client.publish(f"smartwaste/{THING_NAME}/status", json.dumps(payload), qos=1)
+
+# Example usage
+publish_bin_data(75, "Recyclables", False)
+time.sleep(5)
+
+client.loop_stop()
+client.disconnect()
+This securely publishes anonymized bin data using MQTT over TLS, ensuring privacy and integrity.
