@@ -1,0 +1,213 @@
+PHASE 1: Hardware Sensor Interface (e.g., ESP32 + MAX30102 for HR/SpO2)
+1. Setup and Read PPG Sensor Data from MAX30102
+Target Board: ESP32
+Sensor: MAX30102 (Heart Rate & SpO2)
+cpp
+CopyEdit
+#include <Wire.h>
+#include "MAX30105.h"
+
+MAX30105 particleSensor;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30102 not found. Check wiring/power.");
+    while (1);
+  }
+
+  particleSensor.setup(); // Configure sensor with default settings
+  particleSensor.setPulseAmplitudeRed(0x0A); // Turn Red LED to low
+  particleSensor.setPulseAmplitudeIR(0x0A);  // Turn IR LED to low
+}
+
+void loop() {
+  long irValue = particleSensor.getIR();
+  long redValue = particleSensor.getRed();
+
+  Serial.print("IR: ");
+  Serial.print(irValue);
+  Serial.print(" | RED: ");
+  Serial.println(redValue);
+
+  delay(100);
+}
+
+I’ll walk you through all the steps and full code needed to build this Personalized Healthcare Wearable with Edge AI. We're going to break it down into 10 complete modules, with code and explanation for each:
+________________________________________
+Step 1: Sensor Data Acquisition (ESP32 + MAX30102 for HR & SpO2)
+cpp
+CopyEdit
+// Arduino C++ Code (ESP32 + MAX30102)
+#include <Wire.h>
+#include "MAX30105.h"
+
+MAX30105 particleSensor;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30102 not found. Please check wiring.");
+    while (1);
+  }
+  
+  particleSensor.setup();  // Use default settings
+  particleSensor.setPulseAmplitudeRed(0x0A); // Turn Red LED on
+  particleSensor.setPulseAmplitudeIR(0x0A);  // Turn IR LED on
+}
+
+void loop() {
+  long irValue = particleSensor.getIR();
+  long redValue = particleSensor.getRed();
+  
+  Serial.print("IR: ");
+  Serial.print(irValue);
+  Serial.print(" | Red: ");
+  Serial.println(redValue);
+  
+  delay(100);
+}
+________________________________________
+Step 2: Signal Processing in Python (on collected data)
+python
+CopyEdit
+import numpy as np
+from scipy.signal import butter, filtfilt
+
+# Simulated IR values (from sensor)
+raw_signal = np.loadtxt("ppg_ir_signal.csv")
+
+# Apply Butterworth filter
+def butter_lowpass_filter(data, cutoff=2.5, fs=25.0, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return filtfilt(b, a, data)
+
+filtered = butter_lowpass_filter(raw_signal)
+
+# Now use peak detection for heart rate
+from scipy.signal import find_peaks
+
+peaks, _ = find_peaks(filtered, distance=25)
+heart_rate = (len(peaks) / (len(raw_signal)/25)) * 60  # BPM
+print(f"Heart Rate: {heart_rate:.2f} bpm")
+________________________________________
+Step 3: Train AI Model for Anomaly Detection (Python + TensorFlow)
+python
+CopyEdit
+import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+
+# Simulated time-series HR data
+X = np.load("X_train.npy")  # shape: [samples, time_steps, features]
+y = np.load("y_train.npy")  # shape: [samples]
+
+model = Sequential([
+    LSTM(32, input_shape=(X.shape[1], X.shape[2]), return_sequences=False),
+    Dense(1, activation='sigmoid')
+])
+
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+model.fit(X, y, epochs=10, batch_size=32, validation_split=0.2)
+
+model.save("anomaly_lstm_model.h5")
+________________________________________
+Step 4: Convert Model to TensorFlow Lite (Edge Deployment)
+bash
+CopyEdit
+# Terminal command
+tflite_convert \
+  --output_file=anomaly_model.tflite \
+  --keras_model_file=anomaly_lstm_model.h5 \
+  --post_training_quantize
+________________________________________
+Step 5: Deploy TFLite Model on ESP32 using TensorFlow Lite Micro
+cpp
+CopyEdit
+// Pseudocode for TensorFlow Lite Micro on ESP32 (C++)
+#include "anomaly_model_data.h"  // Converted model data array
+#include "tensorflow/lite/micro/micro_interpreter.h"
+
+const tflite::Model* model = ::tflite::GetModel(anomaly_model_data);
+tflite::MicroInterpreter interpreter(model, ...); // Memory allocation
+
+// Prepare input tensor
+float input_data[30];  // Assuming 30 time steps
+for (int i = 0; i < 30; i++) {
+  input_tensor->data.f[i] = sensor_data[i];
+}
+
+interpreter.Invoke();
+float result = output_tensor->data.f[0];
+
+if (result > 0.8) {
+  trigger_vibration(); // Alert user
+}
+________________________________________
+Step 6: Bluetooth Low Energy (BLE) Alert + Sync with App
+cpp
+CopyEdit
+// BLE example (ESP32 Arduino)
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// BLE setup and characteristics omitted for brevity
+BLECharacteristic *pCharacteristic;
+
+// After detection
+String anomalyMsg = "Heart Rate Anomaly Detected!";
+pCharacteristic->setValue(anomalyMsg.c_str());
+pCharacteristic->notify();  // Send to paired phone
+________________________________________
+Step 7: Flutter App to Receive BLE Alerts
+dart
+CopyEdit
+// Flutter using flutter_blue_plus package
+FlutterBluePlus.instance.scanResults.listen((results) {
+  for (ScanResult r in results) {
+    if (r.device.name == "WearableMonitor") {
+      r.device.connect();
+      // Subscribe to characteristic
+      r.device.discoverServices().then((services) {
+        final characteristic = services.first.characteristics.first;
+        characteristic.setNotifyValue(true);
+        characteristic.value.listen((value) {
+          final message = utf8.decode(value);
+          print("ALERT: $message");
+        });
+      });
+    }
+  }
+});
+________________________________________
+Step 8: Secure Cloud Integration (Firebase + Encryption)
+python
+CopyEdit
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+cred = credentials.Certificate("firebase-creds.json")
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+db.collection("patients").document("user123").set({
+    "last_anomaly": "Tachycardia",
+    "timestamp": firestore.SERVER_TIMESTAMP
+})
+________________________________________
+Step 9: OTA Firmware Update & Model Updates
+ESP-IDF + Secure bootloader setup will be needed. Model updates can be encrypted and flashed OTA using:
+bash
+CopyEdit
+idf.py ota --file firmware.bin --device /dev/ttyUSB0
+________________________________________
+Step 10: Federated Learning / Personalization (Advanced)
+Future roadmap: Allow the model to fine-tune using on-device feedback without sending raw data, using federated learning or retraining with TFLite's experimental personalization API.
