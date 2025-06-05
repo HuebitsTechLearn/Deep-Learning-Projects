@@ -1,0 +1,255 @@
+1. Object Detection (YOLOv8) on Edge Devices
+Use Case: Detect humans, vehicles, or unattended bags in the surveillance feed.
+Step 1: Install Dependencies
+bash
+CopyEdit
+pip install ultralytics opencv-python-headless
+Step 2: Python Script to Load YOLOv8 and Detect Objects
+python
+CopyEdit
+from ultralytics import YOLO
+import cv2
+
+model = YOLO('yolov8n.pt')  # Use small version for edge
+
+cap = cv2.VideoCapture("rtsp://your_camera_stream")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    results = model(frame)
+    annotated_frame = results[0].plot()
+    cv2.imshow("YOLOv8 Detection", annotated_frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+cap.release()
+cv2.destroyAllWindows()
+________________________________________
+2. Facial Recognition (FaceNet + Face Database)
+Step 1: Dependencies
+bash
+CopyEdit
+pip install face_recognition opencv-python
+Step 2: Python Script
+python
+CopyEdit
+import face_recognition
+import cv2
+import os
+
+# Load known face encodings
+known_encodings = []
+known_names = []
+for person in os.listdir("face_db"):
+    image = face_recognition.load_image_file(f"face_db/{person}")
+    enc = face_recognition.face_encodings(image)[0]
+    known_encodings.append(enc)
+    known_names.append(os.path.splitext(person)[0])
+
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    faces = face_recognition.face_locations(rgb)
+    encodings = face_recognition.face_encodings(rgb, faces)
+
+    for (top, right, bottom, left), encoding in zip(faces, encodings):
+        matches = face_recognition.compare_faces(known_encodings, encoding)
+        name = "Unknown"
+
+        if True in matches:
+            name = known_names[matches.index(True)]
+
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+    cv2.imshow("Face Recognition", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+cap.release()
+cv2.destroyAllWindows()
+________________________________________
+3. Behavior Detection (Loitering & Intrusion via Object Tracking)
+Tracking Code with Timer Logic
+python
+CopyEdit
+from collections import defaultdict
+import time
+
+class LoiteringDetector:
+    def __init__(self, threshold=60):
+        self.object_times = defaultdict(lambda: time.time())
+        self.threshold = threshold
+
+    def check_loitering(self, object_id):
+        current_time = time.time()
+        if current_time - self.object_times[object_id] > self.threshold:
+            print(f"Loitering detected: Object ID {object_id}")
+            return True
+        return False
+
+# Use this with your object tracker like DeepSORT or ByteTrack
+________________________________________
+4. Real-time Alerting with MQTT
+Step 1: Install MQTT Client
+bash
+CopyEdit
+pip install paho-mqtt
+Step 2: Publish Alert
+python
+CopyEdit
+import paho.mqtt.client as mqtt
+
+client = mqtt.Client()
+client.connect("your.mqtt.broker.ip", 1883, 60)
+
+def send_alert(message):
+    client.publish("surveillance/alerts", message)
+
+send_alert("Intrusion detected in Zone 4")
+________________________________________
+5. Edge Deployment with NVIDIA Jetson (TensorRT Optimization)
+Sample Workflow
+bash
+CopyEdit
+# Convert PyTorch or ONNX model to TensorRT
+trtexec --onnx=model.onnx --saveEngine=model.trt --fp16
+Inference Using TensorRT
+python
+CopyEdit
+# Load TensorRT engine using PyCUDA or TensorRT runtime
+________________________________________
+6. Central Dashboard (Flask + React)
+Flask Backend (alerts.py)
+python
+CopyEdit
+from flask import Flask, request, jsonify
+app = Flask(__name__)
+
+@app.route('/alert', methods=['POST'])
+def alert():
+    data = request.json
+    print("Alert:", data)
+    return jsonify({"status": "received"})
+
+app.run(host="0.0.0.0", port=5000)
+React Frontend: (Simple dashboard to show alerts in real-time)
+Dockerized Edge AI Surveillance and an OTA (Over-The-Air) Model Update Pipeline so you can scale this across 1 cam or 10,000 without losing your mind or bandwidth.
+________________________________________
+Part 1: Dockerize the Intelligent Surveillance App (Edge Node)
+1. Folder Structure
+css
+CopyEdit
+intelligent-surveillance/
+├── Dockerfile
+├── requirements.txt
+├── app/
+│   ├── main.py
+│   ├── yolo_detector.py
+│   ├── face_recognition.py
+│   ├── behavior_analysis.py
+│   └── mqtt_alert.py
+└── models/
+    └── yolov8n.pt
+________________________________________
+2. Dockerfile
+dockerfile
+CopyEdit
+FROM python:3.9-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./app ./app
+COPY ./models ./models
+
+WORKDIR /app
+CMD ["python", "main.py"]
+________________________________________
+3. requirements.txt
+nginx
+CopyEdit
+ultralytics
+opencv-python-headless
+face_recognition
+paho-mqtt
+numpy
+________________________________________
+4. Build & Run Container
+bash
+CopyEdit
+docker build -t edge-ai-surveillance .
+docker run --restart unless-stopped --net=host --name edge-cam1 edge-ai-surveillance
+--net=host gives low-latency access to RTSP feeds and MQTT brokers on local networks.
+________________________________________
+Part 2: OTA (Over-The-Air) Model & Config Update System
+Edge devices need to pull updated models, config rules, or AI weights—just like Iron Man downloads new suits. Let’s automate that.
+________________________________________
+1. Folder Structure (Extended)
+arduino
+CopyEdit
+intelligent-surveillance/
+├── app/
+│   ├── model_updater.py
+│   └── config.json  ← contains inference settings
+________________________________________
+2. model_updater.py
+python
+CopyEdit
+import requests
+import os
+
+MODEL_URL = "http://your.server.com/models/yolov8n.pt"
+MODEL_PATH = "/app/models/yolov8n.pt"
+
+def update_model():
+    response = requests.get(MODEL_URL)
+    if response.status_code == 200:
+        with open(MODEL_PATH, 'wb') as f:
+            f.write(response.content)
+        print("Model updated successfully.")
+    else:
+        print("Model update failed.")
+
+if __name__ == "__main__":
+    update_model()
+________________________________________
+3. Schedule Cron in Docker Container
+Add to Dockerfile:
+dockerfile
+CopyEdit
+RUN apt-get update && apt-get install -y cron
+COPY cronjob /etc/cron.d/model-cron
+RUN chmod 0644 /etc/cron.d/model-cron && crontab /etc/cron.d/model-cron
+cronjob
+swift
+CopyEdit
+0 */6 * * * root python /app/app/model_updater.py >> /var/log/model_update.log 2>&1
+________________________________________
+4. Host a Lightweight Model Server
+You can use Flask to serve your latest models and configs:
+python
+CopyEdit
+from flask import Flask, send_from_directory
+
+app = Flask(__name__)
+
+@app.route('/models/<filename>')
+def serve_model(filename):
+    return send_from_directory("models", filename)
+
+app.run(host="0.0.0.0", port=8080)
+
+
+Optional: OTA Triggered from Central Server (Webhook)
+Instead of polling every 6 hours, edge can listen for MQTT or HTTP “update now” signals:
+python
+CopyEdit
+# On receiving MQTT topic: 'model/update'
+update_model()
+
