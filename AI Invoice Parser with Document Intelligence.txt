@@ -1,0 +1,271 @@
+import os
+import io
+import re
+from PIL import Image, ImageDraw, ImageFont # Pillow for image handling
+import numpy as np
+import pytesseract # OCR engine
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from pydantic import BaseModel
+import uvicorn
+import random # For dummy data generation
+import json # For structured output
+
+# --- Configuration & Global Variables ---
+# Tesseract OCR executable path (adjust if not in PATH)
+# For Windows: r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# For Linux/macOS: 'tesseract' (if installed and in PATH)
+pytesseract.pytesseract.tesseract_cmd = os.getenv('TESSERACT_CMD', 'tesseract')
+
+# Define target fields for extraction
+INVOICE_FIELDS = {
+    "invoice_number": r"(invoice|bill|no)\s*[:#]\s*(\w+)",
+    "total_amount": r"(total|balance due|amount due)\s*[:$€£]?\s*([\d\.,]+)",
+    "date": r"(date|bill date|invoice date)\s*[:]\s*([\d\/-]+)",
+    "vendor_name": r"(from|vendor)\s*[:]?\s*([A-Za-z\s.,'-]+)", # Simple placeholder for vendor name
+    # Add more fields with regex patterns as needed
+    # "due_date": r"(due date)\s*[:]\s*([\d\/-]+)",
+    # "item_description": r"(description|item)\s*([\w\s]+)", # More complex, often needs line item parsing
+}
+
+# --- Section 1: Document Preprocessing (Conceptual) ---
+# This part handles basic image loading and manipulation.
+# For PDFs, you'd use a library like `pdf2image` to convert PDF pages to images first.
+
+def preprocess_image(image: Image.Image) -> Image.Image:
+    """
+    Performs basic preprocessing on the image.
+    In a real system, this could include deskewing, binarization, noise reduction.
+    """
+    print("Preprocessing image...")
+    # Convert to grayscale
+    if image.mode != 'L':
+        image = image.convert('L')
+    
+    # Resize for consistency (optional, might affect OCR accuracy depending on DPI)
+    # For a real system, you might normalize DPI instead of fixed resize
+    # if image.width > 2000 or image.height > 2000:
+    #     image = image.resize((image.width // 2, image.height // 2), Image.LANCZOS)
+    
+    # Apply thresholding or other enhancements if needed for OCR
+    # For example, simple binary thresholding:
+    # image = image.point(lambda x: 0 if x < 128 else 255)
+    
+    print("Image preprocessing complete (grayscale conversion).")
+    return image
+
+# --- Section 2: OCR with Tesseract & Bounding Boxes ---
+# This uses pytesseract to extract text and bounding box information.
+
+def perform_ocr_with_bboxes(image: Image.Image):
+    """
+    Performs OCR using Tesseract and extracts text along with bounding box data.
+    
+    Args:
+        image (PIL.Image.Image): The preprocessed invoice image.
+    Returns:
+        dict: Tesseract's detailed OCR output (including text, conf, bounding boxes).
+    """
+    print("Performing OCR with Tesseract...")
+    # Output type 'data.frame' gives detailed bounding box info per word
+    ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    print("OCR complete.")
+    return ocr_data
+
+def draw_ocr_boxes(image: Image.Image, ocr_data):
+    """
+    Draws bounding boxes and text on the image for visualization purposes.
+    
+    Args:
+        image (PIL.Image.Image): The original or preprocessed image.
+        ocr_data (dict): Output from pytesseract.image_to_data.
+    Returns:
+        PIL.Image.Image: Image with drawn bounding boxes.
+    """
+    draw = ImageDraw.Draw(image)
+    # font = ImageFont.truetype("arial.ttf", 15) # Requires an existing font file
+    
+    for i in range(len(ocr_data['text'])):
+        if int(ocr_data['conf'][i]) > 70: # Only draw high confidence words
+            x, y, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+            draw.rectangle([(x, y), (x + w, y + h)], outline="red", width=2)
+            # text = ocr_data['text'][i]
+            # draw.text((x, y - 10), text, fill="blue", font=font) # Draw text above box
+    return image
+
+# --- Section 3: Conceptual Layout-Aware Feature Preparation (for LayoutLM) ---
+# This section explains how data would be prepared for a LayoutLM-like model.
+# A full LayoutLM implementation is too complex for a single snippet.
+
+def prepare_layoutlm_features_conceptual(ocr_data, image_size=(IMG_HEIGHT, IMG_WIDTH)):
+    """
+    Conceptually prepares features for a LayoutLM-like model.
+    LayoutLM takes tokenized text, their bounding boxes, and image features.
+    
+    Args:
+        ocr_data (dict): Output from pytesseract.image_to_data.
+        image_size (tuple): (height, width) of the original image.
+    Returns:
+        dict: Conceptual features for LayoutLM.
+    """
+    print("\nConceptually preparing features for a LayoutLM-like model...")
+    tokens = []
+    bboxes = []
+    
+    for i in range(len(ocr_data['text'])):
+        text = ocr_data['text'][i].strip()
+        conf = int(ocr_data['conf'][i])
+        
+        if text and conf > 70: # Consider only confident words
+            x1, y1, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+            x2, y2 = x1 + w, y1 + h
+
+            # Normalize bounding box coordinates to be between 0 and 1000 (LayoutLM convention)
+            # Note: Max value is 1000 as per LayoutLM paper
+            norm_x1 = int(1000 * (x1 / image_size[1]))
+            norm_y1 = int(1000 * (y1 / image_size[0]))
+            norm_x2 = int(1000 * (x2 / image_size[1]))
+            norm_y2 = int(1000 * (y2 / image_size[0]))
+            
+            tokens.append(text)
+            bboxes.append([norm_x1, norm_y1, norm_x2, norm_y2])
+
+    # In a real LayoutLM setup, you would:
+    # 1. Tokenize `tokens` using a BERT-like tokenizer.
+    # 2. Map `bboxes` to these new tokens.
+    # 3. Add special tokens ([CLS], [SEP], [PAD]).
+    # 4. Integrate visual features (e.g., from a CNN backbone applied to the image).
+    # 5. Feed these to a pre-trained LayoutLM model for fine-tuning or inference.
+
+    print(f"  Extracted {len(tokens)} text tokens with normalized bounding boxes.")
+    print("  (A real LayoutLM implementation would now use these for model input.)")
+    return {"tokens": tokens, "bboxes": bboxes}
+
+
+# --- Section 4: Conceptual Information Extraction (Dummy Rule-Based) ---
+# Since a full LayoutLM is out of scope for a single snippet, this provides
+# a conceptual rule-based extraction that simulates the desired structured output.
+
+def extract_invoice_data_conceptual(full_text: str, ocr_data_with_bboxes: dict) -> dict:
+    """
+    Conceptually extracts invoice fields using simple regex patterns.
+    In a real system, a LayoutLM model would predict these fields.
+    """
+    print("\nConceptually extracting invoice data using rule-based patterns...")
+    extracted_data = {}
+    
+    # Iterate through each defined field and its regex pattern
+    for field, pattern in INVOICE_FIELDS.items():
+        match = re.search(pattern, full_text, re.IGNORECASE)
+        if match:
+            # For simplicity, assume the value is in the second capturing group
+            value = match.group(2).strip()
+            # Simple cleaning for amounts (remove commas, handle currency symbols)
+            if "amount" in field:
+                value = re.sub(r'[^\d\.]', '', value) # Keep only digits and decimal point
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass # Keep as string if conversion fails
+            extracted_data[field] = value
+        else:
+            extracted_data[field] = None # Or a suitable default value
+
+    # For line items, this would be much more complex, potentially involving:
+    # 1. Detecting table structures using layout data.
+    # 2. Extracting rows and columns based on bounding box alignment.
+    # 3. Classifying individual cells (item name, quantity, unit price, line total).
+    extracted_data["line_items"] = [
+        {"description": "Dummy Item 1", "quantity": 1, "unit_price": 100.0, "total": 100.0},
+        {"description": "Dummy Item 2", "quantity": 2, "unit_price": 25.0, "total": 50.0}
+    ] if extracted_data.get("total_amount") else []
+
+    print("Conceptual extraction complete.")
+    return extracted_data
+
+
+# --- Section 5: FastAPI Integration for API ---
+# This sets up a basic FastAPI application to serve the invoice parsing functionality.
+
+app = FastAPI(
+    title="AI Invoice Parser API",
+    description="Extracts structured data from invoice images using conceptual AI.",
+    version="0.1.0"
+)
+
+# Define response model for the extracted invoice data
+class InvoiceDataResponse(BaseModel):
+    invoice_number: str | None
+    total_amount: float | str | None
+    date: str | None
+    vendor_name: str | None
+    line_items: list[dict] # List of dictionaries for items
+    full_text_extracted: str
+
+@app.post("/parse_invoice/", response_model=InvoiceDataResponse)
+async def parse_invoice(invoice_image: UploadFile = File(...)):
+    """
+    Endpoint to parse an invoice image.
+    Receives an image, performs OCR, and extracts structured invoice data.
+    """
+    print(f"Received invoice image: {invoice_image.filename}, Content-Type: {invoice_image.content_type}")
+    
+    try:
+        # 1. Load image using Pillow
+        image_bytes = await invoice_image.read()
+        pil_image = Image.open(io.BytesIO(image_bytes))
+
+        # Check if the image format is supported by PIL
+        if pil_image.format not in ['JPEG', 'PNG', 'TIFF', 'BMP', 'GIF', 'WEBP']:
+             raise HTTPException(status_code=400, detail="Unsupported image format. Please upload JPG, PNG, TIFF, BMP, GIF, or WEBP.")
+
+        original_width, original_height = pil_image.size
+
+        # 2. Preprocess Image
+        processed_image = preprocess_image(pil_image.copy()) # Pass a copy to avoid modifying original in-place
+
+        # 3. Perform OCR
+        ocr_data = perform_ocr_with_bboxes(processed_image)
+        full_text = " ".join([t.strip() for t in ocr_data['text'] if t.strip()]) # Get concatenated text
+
+        # 4. Conceptual Layout-Aware Feature Preparation (for LayoutLM)
+        # This step is just for demonstration of input format.
+        # In a real app, this data would go into a LayoutLM model.
+        layout_features_concept = prepare_layoutlm_features_conceptual(
+            ocr_data, image_size=(original_height, original_width)
+        )
+
+        # 5. Conceptual Information Extraction (Dummy Rule-Based)
+        extracted_fields = extract_invoice_data_conceptual(full_text, ocr_data)
+
+        return InvoiceDataResponse(
+            invoice_number=extracted_fields.get("invoice_number"),
+            total_amount=extracted_fields.get("total_amount"),
+            date=extracted_fields.get("date"),
+            vendor_name=extracted_fields.get("vendor_name"),
+            line_items=extracted_fields.get("line_items"),
+            full_text_extracted=full_text
+        )
+
+    except pytesseract.TesseractNotFoundError:
+        raise HTTPException(status_code=500, detail="Tesseract OCR engine not found. Please install Tesseract and set its path correctly.")
+    except Exception as e:
+        print(f"An error occurred during invoice parsing: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.get("/")
+async def root():
+    return {"message": "AI Invoice Parser API is running. Go to /docs for API documentation."}
+
+# --- Main execution block for running the FastAPI app ---
+if __name__ == "__main__":
+    print("--- Starting AI Invoice Parser API (FastAPI) ---")
+    print("Please ensure Tesseract OCR is installed and its path is correctly configured.")
+    print("\nAccess the API at: http://127.0.0.1:8000")
+    print("View API documentation (Swagger UI) at: http://127.0.0.1:8000/docs")
+    print("Upload an invoice image to http://127.0.0.1:8000/parse_invoice/ to test.")
+    
+    # You might need to set TESSERACT_CMD environment variable before running if Tesseract is not in PATH
+    # Example for Windows: os.environ['TESSERACT_CMD'] = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
