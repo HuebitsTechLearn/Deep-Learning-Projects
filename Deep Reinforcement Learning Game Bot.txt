@@ -1,0 +1,330 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import gymnasium as gym # Using Gymnasium, the successor to OpenAI Gym
+import numpy as np
+import random
+from collections import deque # For experience replay buffer
+import matplotlib.pyplot as plt
+
+# --- Section 1: Deep Q-Network (DQN) Model Architecture ---
+# This defines the neural network that will approximate the Q-function.
+# For CartPole, the input is the observation space (4 continuous values),
+# and the output is the Q-value for each possible action (2 discrete actions).
+
+class QNetwork(nn.Module):
+    """
+    A simple Feedforward Neural Network to approximate the Q-function.
+    It takes the state as input and outputs Q-values for each action.
+    """
+    def __init__(self, state_dim, action_dim):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_dim)
+
+    def forward(self, state):
+        x = F.relu(self.fc1(state))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x) # Output Q-values for each action
+
+# --- Section 2: Experience Replay Buffer ---
+# Experience Replay is crucial for stabilizing DQN training.
+# It stores (state, action, reward, next_state, done) tuples,
+# allowing the agent to learn from past experiences.
+
+class ReplayBuffer:
+    """
+    A simple replay buffer to store experiences (transitions).
+    """
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+
+    def add(self, state, action, reward, next_state, done):
+        """Adds a new experience to the buffer."""
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        """Samples a random batch of experiences from the buffer."""
+        if len(self.buffer) < batch_size:
+            return None # Not enough experiences to sample
+        batch = random.sample(self.buffer, batch_size)
+        # Unpack batch into separate lists/tensors
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return states, actions, rewards, next_states, dones
+
+    def __len__(self):
+        """Returns the current size of the buffer."""
+        return len(self.buffer)
+
+# --- Section 3: DQN Agent Implementation ---
+# This class encapsulates the Q-networks, replay buffer, and learning logic.
+
+class DQNAgent:
+    """
+    Deep Q-Network Agent.
+    Implements the DQN algorithm with experience replay and target network.
+    """
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.995,
+                 replay_buffer_capacity=10000, batch_size=64,
+                 target_update_frequency=100):
+        
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.gamma = gamma # Discount factor
+        self.epsilon = epsilon_start # Epsilon for epsilon-greedy action selection
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update_frequency = target_update_frequency
+        self.update_count = 0 # Counter for target network updates
+
+        # Define device for PyTorch tensors (GPU if available, else CPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+
+        # Policy Q-Network (learns and updates)
+        self.policy_net = QNetwork(state_dim, action_dim).to(self.device)
+        # Target Q-Network (for stable Q-value calculation)
+        self.target_net = QNetwork(state_dim, action_dim).to(self.device)
+        # Initialize target_net with policy_net's weights
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval() # Set target net to evaluation mode
+
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        self.criterion = nn.MSELoss() # Mean Squared Error Loss
+
+        self.replay_buffer = ReplayBuffer(replay_buffer_capacity)
+
+    def select_action(self, state):
+        """
+        Selects an action using an epsilon-greedy policy.
+        Args:
+            state (np.array): Current observation from the environment.
+        Returns:
+            int: The chosen action.
+        """
+        # Epsilon-greedy action selection
+        if random.random() < self.epsilon:
+            return random.randrange(self.action_dim) # Explore: choose random action
+        else:
+            # Exploit: choose action with highest Q-value from policy network
+            with torch.no_grad(): # Don't track gradients for action selection
+                # Convert state to PyTorch tensor and add batch dimension
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                q_values = self.policy_net(state_tensor)
+                return q_values.argmax(1).item() # Get index of max Q-value
+
+    def learn(self):
+        """
+        Performs one learning step using a batch from the replay buffer.
+        Updates the policy Q-Network.
+        """
+        if len(self.replay_buffer) < self.batch_size:
+            return # Not enough experiences to learn
+
+        # Sample a batch of transitions from the replay buffer
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+
+        # Convert lists of numpy arrays to PyTorch tensors
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.LongTensor(actions).unsqueeze(1).to(self.device) # unsqueeze for gather
+        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device) # 0.0 if done, 1.0 if not done (for next Q)
+
+        # Calculate Q-values from the policy network for the taken actions
+        # .gather(1, actions) selects the Q-value corresponding to the action taken
+        q_expected = self.policy_net(states).gather(1, actions)
+
+        # Calculate target Q-values for the next states from the target network
+        # Detach prevents gradients from flowing into the target network
+        # (1 - dones) * ... handles terminal states (Q-value is 0 if done)
+        q_targets_next = self.target_net(next_states).max(1)[0].unsqueeze(1).detach()
+        q_targets = rewards + (self.gamma * q_targets_next * (1 - dones))
+
+        # Compute loss and perform backpropagation
+        loss = self.criterion(q_expected, q_targets)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # Update target network (soft or hard update)
+        self.update_count += 1
+        if self.update_count % self.target_update_frequency == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+            # For a "soft update" (more advanced), you'd blend weights:
+            # for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+            #     target_param.data.copy_(TAU * policy_param.data + (1.0 - TAU) * target_param.data)
+
+
+    def update_epsilon(self):
+        """Decays epsilon for epsilon-greedy policy."""
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+
+# --- Section 4: Training Loop ---
+# This section orchestrates the interaction between the agent and the environment
+# for a specified number of episodes.
+
+def train_dqn_agent(env_name="CartPole-v1", num_episodes=500,
+                    replay_buffer_capacity=10000, batch_size=64,
+                    target_update_frequency=100, lr=1e-3, gamma=0.99,
+                    epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.995):
+    """
+    Trains a DQN agent to play a Gymnasium environment.
+
+    Args:
+        env_name (str): Name of the Gymnasium environment (e.g., "CartPole-v1").
+        num_episodes (int): Total number of training episodes.
+        ... other DQN hyperparameters ...
+    Returns:
+        list: List of total rewards obtained in each episode.
+    """
+    print(f"\n--- Starting DQN Agent Training on {env_name} ---")
+    env = gym.make(env_name)
+
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    agent = DQNAgent(state_dim, action_dim, lr, gamma, epsilon_start, epsilon_end,
+                     epsilon_decay, replay_buffer_capacity, batch_size,
+                     target_update_frequency)
+
+    rewards_per_episode = []
+
+    for episode in range(1, num_episodes + 1):
+        state, _ = env.reset() # env.reset() returns (observation, info) in Gymnasium
+        total_reward = 0
+        done = False
+        
+        while not done:
+            action = agent.select_action(state)
+            
+            # env.step() returns (observation, reward, terminated, truncated, info)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated # Episode ends if terminated OR truncated
+
+            # Store experience in replay buffer
+            agent.replay_buffer.add(state, action, reward, next_state, done)
+            
+            # Perform learning step if buffer is sufficiently large
+            agent.learn()
+
+            state = next_state
+            total_reward += reward
+
+        rewards_per_episode.append(total_reward)
+        agent.update_epsilon() # Decay epsilon after each episode
+
+        if episode % 10 == 0:
+            avg_reward = np.mean(rewards_per_episode[-10:])
+            print(f"Episode {episode}/{num_episodes}, Total Reward: {total_reward:.2f}, Avg 10-Ep Reward: {avg_reward:.2f}, Epsilon: {agent.epsilon:.3f}")
+
+        # Check for convergence condition (e.g., CartPole solved at 200 avg reward)
+        if len(rewards_per_episode) >= 100 and np.mean(rewards_per_episode[-100:]) >= 195:
+            print(f"\nEnvironment solved after {episode} episodes!")
+            break
+            
+    env.close()
+    print("--- DQN Agent Training Finished ---")
+    return rewards_per_episode
+
+# --- Section 5: Evaluation Loop ---
+# After training, you can evaluate the agent's performance by running it
+# in the environment with a greedy (non-exploratory) policy.
+
+def evaluate_dqn_agent(agent, env_name="CartPole-v1", num_eval_episodes=10):
+    """
+    Evaluates the performance of a trained DQN agent without exploration.
+
+    Args:
+        agent (DQNAgent): The trained DQN agent.
+        env_name (str): Name of the Gymnasium environment.
+        num_eval_episodes (int): Number of episodes to run for evaluation.
+    Returns:
+        list: List of total rewards obtained in each evaluation episode.
+    """
+    print(f"\n--- Starting DQN Agent Evaluation on {env_name} ---")
+    eval_env = gym.make(env_name, render_mode="human") # Render to see performance
+    
+    agent.policy_net.eval() # Set policy network to evaluation mode
+    original_epsilon = agent.epsilon # Store original epsilon
+    agent.epsilon = 0.0 # Set epsilon to 0 for greedy action selection during evaluation
+
+    eval_rewards = []
+    for episode in range(num_eval_episodes):
+        state, _ = eval_env.reset()
+        total_reward = 0
+        done = False
+        while not done:
+            action = agent.select_action(state) # Always greedy
+            next_state, reward, terminated, truncated, _ = eval_env.step(action)
+            done = terminated or truncated
+            state = next_state
+            total_reward += reward
+        eval_rewards.append(total_reward)
+        print(f"Evaluation Episode {episode+1}/{num_eval_episodes}, Total Reward: {total_reward:.2f}")
+
+    eval_env.close()
+    agent.epsilon = original_epsilon # Restore original epsilon
+    agent.policy_net.train() # Set policy network back to training mode
+    print(f"--- DQN Agent Evaluation Finished. Average Reward: {np.mean(eval_rewards):.2f} ---")
+    return eval_rewards
+
+# --- Main Execution Flow ---
+if __name__ == '__main__':
+    # Define environment and training parameters
+    ENV_NAME = "CartPole-v1" # A simple environment for quick testing
+    NUM_EPISODES = 500
+    REPLAY_BUFFER_CAPACITY = 10000
+    BATCH_SIZE = 64
+    TARGET_UPDATE_FREQUENCY = 100 # How often to update the target network's weights
+    LEARNING_RATE = 1e-3
+    GAMMA = 0.99
+    EPSILON_START = 1.0 # Initial exploration rate
+    EPSILON_END = 0.01 # Minimum exploration rate
+    EPSILON_DECAY = 0.995 # Epsilon decay rate per episode
+
+    # Step 1: Train the DQN Agent
+    # This will train the agent and print progress to the console.
+    # It might take a few minutes depending on your CPU/GPU.
+    episode_rewards = train_dqn_agent(
+        env_name=ENV_NAME,
+        num_episodes=NUM_EPISODES,
+        replay_buffer_capacity=REPLAY_BUFFER_CAPACITY,
+        batch_size=BATCH_SIZE,
+        target_update_frequency=TARGET_UPDATE_FREQUENCY,
+        lr=LEARNING_RATE,
+        gamma=GAMMA,
+        epsilon_start=EPSILON_START,
+        epsilon_end=EPSILON_END,
+        epsilon_decay=EPSILON_DECAY
+    )
+
+    # Optional: Plot training rewards
+    plt.figure(figsize=(10, 6))
+    plt.plot(episode_rewards)
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.title(f"DQN Training Rewards for {ENV_NAME}")
+    plt.grid(True)
+    plt.show()
+
+    # Step 2: Evaluate the trained agent
+    # First, re-initialize the agent with the same parameters
+    # to load the implicitly trained policy network state.
+    # In a real scenario, you would save/load the agent's policy_net state_dict.
+    print("\nRe-initializing agent for evaluation (in a real app, you'd load saved weights).")
+    env_eval = gym.make(ENV_NAME)
+    agent_for_eval = DQNAgent(env_eval.observation_space.shape[0], env_eval.action_space.n,
+                              lr=LEARNING_RATE, gamma=GAMMA, epsilon_start=0.0, # Epsilon 0 for greedy
+                              epsilon_end=0.0, epsilon_decay=1.0) # No decay for eval
+    
+    # Manually copy weights from the trained agent's policy_net
+    # In a real scenario, you'd load from a .pth file saved during training
+    agent_for_eval.policy_net.load_state_dict(agent.policy_net.state_dict())
+    
+    evaluate_rewards = evaluate_dqn_agent(agent_for_eval, env_name=ENV_NAME, num_eval_episodes=5)
+    env_eval.close()
