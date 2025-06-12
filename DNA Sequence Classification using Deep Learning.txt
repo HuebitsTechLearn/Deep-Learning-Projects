@@ -1,0 +1,505 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+import matplotlib.pyplot as plt
+import random
+
+# --- Section 1: DNA Sequence Representation ---
+# This section defines how raw DNA/RNA sequences are converted into
+# numerical inputs suitable for deep learning models.
+
+# Define the four standard DNA nucleotides (A, T, C, G)
+NUCLEOTIDES = 'ATCG'
+# Mapping nucleotides to integers (for one-hot encoding or embedding lookup)
+NUC_TO_INT = {nuc: i for i, nuc in enumerate(NUCLEOTIDES)}
+INT_TO_NUC = {i: nuc for nuc, i in NUC_TO_INT.items()}
+# Index for padding/unknown nucleotides (vocab_size for embedding layer)
+PAD_TOKEN_IDX = len(NUCLEOTIDES) 
+
+def sequence_to_one_hot(sequence, max_len):
+    """
+    Converts a DNA/RNA sequence to a one-hot encoded tensor.
+    Pads or truncates sequences to max_len.
+    
+    Args:
+        sequence (str): The input DNA/RNA sequence (e.g., "ATGCG").
+        max_len (int): The fixed length for the one-hot tensor.
+    Returns:
+        torch.Tensor: One-hot encoded tensor of shape (max_len, num_nucleotides).
+    """
+    encoded_seq = torch.zeros(max_len, len(NUCLEOTIDES), dtype=torch.float32)
+    for i, nuc in enumerate(sequence[:max_len]): # Truncate if longer than max_len
+        if nuc.upper() in NUC_TO_INT:
+            encoded_seq[i, NUC_TO_INT[nuc.upper()]] = 1.0
+        # If nucleotide is not A,T,C,G (e.g., 'N' for unknown), it remains all zeros.
+    return encoded_seq
+
+def sequence_to_indices(sequence, max_len):
+    """
+    Converts a DNA/RNA sequence to a tensor of integer indices.
+    Pads or truncates sequences to max_len.
+    
+    Args:
+        sequence (str): The input DNA/RNA sequence.
+        max_len (int): The fixed length for the indexed tensor.
+    Returns:
+        torch.Tensor: Tensor of integer indices of shape (max_len,).
+    """
+    indices = []
+    for i, nuc in enumerate(sequence[:max_len]):
+        indices.append(NUC_TO_INT.get(nuc.upper(), PAD_TOKEN_IDX)) # Use PAD_TOKEN_IDX for unknown/padding
+    
+    # Pad if sequence is shorter than max_len
+    if len(indices) < max_len:
+        indices.extend([PAD_TOKEN_IDX] * (max_len - len(indices)))
+        
+    return torch.tensor(indices, dtype=torch.long)
+
+# --- Example Usage ---
+sample_dna = "ATGCGTACGTACGTACGTAGCTA"
+max_seq_len = 25 # Example fixed sequence length
+
+one_hot_dna = sequence_to_one_hot(sample_dna, max_seq_len)
+indexed_dna = sequence_to_indices(sample_dna, max_seq_len)
+
+print(f"Original DNA sequence: {sample_dna}")
+print(f"One-hot encoded shape: {one_hot_dna.shape}")
+print(f"Indexed sequence shape: {indexed_dna.shape}")
+print(f"First 5 one-hot vectors:\n{one_hot_dna[:5]}")
+print(f"First 5 indexed values:\n{indexed_dna[:5]}")
+
+
+# --- Section 2: Dummy Dataset Generation ---
+# In a real project, you would load sequences from FASTA files or databases.
+# Here, we simulate by generating random sequences and assigning labels based on a simple rule.
+
+class DummyDNADataset(Dataset):
+    """
+    A conceptual PyTorch Dataset for DNA sequence classification.
+    Generates synthetic DNA sequences and assigns labels based on a 'motif'.
+    """
+    def __init__(self, num_samples, max_seq_len, motif="TATA", class_ratio=0.5, transform=None):
+        self.num_samples = num_samples
+        self.max_seq_len = max_seq_len
+        self.motif = motif.upper()
+        self.transform = transform
+        self.sequences = []
+        self.labels = [] # 0 for no-motif, 1 for motif-present
+        
+        print(f"\nGenerating {num_samples} dummy DNA sequences (max_len={max_seq_len})...")
+        print(f"Class 1 (positive) contains motif: '{self.motif}'")
+
+        for i in range(num_samples):
+            current_seq_len = random.randint(max_seq_len // 2, max_seq_len)
+            
+            if random.random() < class_ratio: # Generate class 1 (motif present)
+                label = 1
+                # Create sequence with motif
+                motif_start_idx = random.randint(0, current_seq_len - len(self.motif))
+                temp_seq_list = [random.choice(NUCLEOTIDES) for _ in range(current_seq_len)]
+                
+                # Insert motif
+                for j, char in enumerate(self.motif):
+                    temp_seq_list[motif_start_idx + j] = char
+                seq = "".join(temp_seq_list)
+            else: # Generate class 0 (no motif)
+                label = 0
+                seq = "".join(random.choice(NUCLEOTIDES) for _ in range(current_seq_len))
+                
+                # Ensure no motif by random chance if generating negative class (simple check)
+                if self.motif in seq:
+                    # Very basic re-generation to ensure no motif for negative class
+                    seq = "".join(random.choice(NUCLEOTIDES) for _ in range(current_seq_len)) 
+
+            self.sequences.append(seq)
+            self.labels.append(label)
+        
+        print("Dummy DNA data generation complete.")
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        sequence = self.sequences[idx]
+        label = self.labels[idx]
+
+        # Convert sequence to indexed representation for embedding layer
+        data = sequence_to_indices(sequence, self.max_seq_len)
+        
+        if self.transform:
+            data = self.transform(data)
+
+        return data, torch.tensor(label, dtype=torch.long)
+
+# Create dummy datasets
+MAX_SEQUENCE_LENGTH = 100 # Maximum length for our sequences
+NUM_SAMPLES = 2000
+MOTIF = "ATATGC" # A dummy genetic motif to look for
+CLASS_BALANCE = 0.5 # 50% positive, 50% negative
+
+# No transform needed for integer-encoded sequences
+train_dataset = DummyDNADataset(num_samples=int(NUM_SAMPLES*0.8), max_seq_len=MAX_SEQUENCE_LENGTH, motif=MOTIF, class_ratio=CLASS_BALANCE)
+val_dataset = DummyDNADataset(num_samples=int(NUM_SAMPLES*0.2), max_seq_len=MAX_SEQUENCE_LENGTH, motif=MOTIF, class_ratio=CLASS_BALANCE)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+print(f"Train dataset size: {len(train_dataset)}")
+print(f"Validation dataset size: {len(val_dataset)}")
+print(f"Example batch (data, label) shape: {next(iter(train_loader))[0].shape}, {next(iter(train_loader))[1].shape}")
+
+
+# --- Section 3: DNA Sequence Classification Model (1D CNN + BiLSTM) ---
+# This model combines 1D CNNs for local pattern detection (motifs) and
+# Bidirectional LSTMs for capturing long-range dependencies and context.
+
+class DNAClassifier(nn.Module):
+    """
+    Deep Learning model for DNA sequence classification.
+    Combines Embedding, 1D CNNs, and Bidirectional LSTMs.
+    """
+    def __init__(self, vocab_size, embedding_dim, seq_len, num_classes):
+        super(DNAClassifier, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=PAD_TOKEN_IDX)
+        
+        # 1D CNN layers for local feature extraction (motif detection)
+        # Input to Conv1d is (batch_size, channels, sequence_length)
+        # After embedding, data is (batch_size, sequence_length, embedding_dim)
+        # So we permute it to (batch_size, embedding_dim, sequence_length)
+        self.conv1 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=5, padding=2)
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
+        self.dropout1 = nn.Dropout(0.3)
+
+        self.conv2 = nn.Conv1d(in_channels=128, out_channels=256, kernel_size=3, padding=1)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
+        self.dropout2 = nn.Dropout(0.3)
+        
+        # Calculate the output sequence length after CNNs for LSTM input
+        # Formula for Conv1d output length: (L_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1
+        # Formula for MaxPool1d output length: (L_in - kernel_size) / stride + 1
+        # L_in_conv1 = seq_len
+        # L_out_conv1 = (L_in_conv1 + 2*2 - 1*(5-1) - 1)/1 + 1 = L_in_conv1
+        # L_out_pool1 = (L_out_conv1 - 2)/2 + 1
+        
+        # For simplification, we can compute dynamically or use a dummy input
+        # Let's compute approx output length for the LSTM input
+        dummy_input = torch.randn(1, embedding_dim, seq_len) # (batch, channels, length)
+        x = self.pool1(F.relu(self.conv1(dummy_input)))
+        x = self.pool2(F.relu(self.conv2(x)))
+        cnn_out_len = x.shape[2]
+        
+        # BiLSTM layers for temporal dependencies
+        # Input to LSTM: (batch_size, seq_len, input_size)
+        # Input_size for LSTM is the out_channels of last CNN layer (256)
+        self.lstm = nn.LSTM(input_size=256, hidden_size=128, num_layers=2, 
+                            bidirectional=True, batch_first=True, dropout=0.3)
+        self.dropout3 = nn.Dropout(0.4)
+
+        # Final classification layers
+        # The output of BiLSTM is (batch_size, seq_len, hidden_size * 2) if return_sequences=True
+        # For classification, we typically take the last hidden state or pool.
+        # Since batch_first=True and bidirectional=True, last hidden state has shape (num_layers * 2, batch, hidden_size)
+        # We'll take the output from the LSTM (batch_first=True) and flatten it after pooling/slicing
+        
+        # Let's average pool the LSTM output over the sequence length for fixed-size input to FC layers
+        # or just take the output of the last hidden state of the LSTM (which is often used for classification)
+        
+        # For simplicity, we'll take the output of the LSTM layer (last sequence element if not return_sequences=True,
+        # or average if return_sequences=True and then flatten)
+        # Let's try flattening the CNN output and then passing to LSTM.
+        
+        self.fc1 = nn.Linear(cnn_out_len * 256, hidden_dim * 2) # After flattening 256 channels and cnn_out_len
+        self.fc2 = nn.Linear(hidden_dim * 2, num_classes) # Final classification layer
+
+    def forward(self, x):
+        # x is (batch_size, seq_len)
+        x = self.embedding(x) # (batch_size, seq_len, embedding_dim)
+        
+        # Permute for Conv1d: (batch_size, embedding_dim, seq_len)
+        x = x.permute(0, 2, 1) 
+        
+        x = self.dropout1(self.pool1(F.relu(self.conv1(x))))
+        x = self.dropout2(self.pool2(F.relu(self.conv2(x))))
+        
+        # Permute back for LSTM: (batch_size, seq_len, channels)
+        # Need to flatten the channels into the sequence dimension for LSTM after CNN
+        # Or flatten the CNN output and feed directly into Dense if not using LSTM after CNN
+        
+        # A common approach for CNN-LSTM is to pass the CNN output per timestep to LSTM
+        # TimeDistributedConv1D (Keras) is effectively a Conv1D applied per time step.
+        # In PyTorch, we can apply CNNs, then flatten their output to sequence dimension for LSTM.
+        
+        # Let's adapt to make it truly CNN-LSTM:
+        # First, run CNNs over the spatial features (embedding_dim) across the sequence length
+        # Then, treat the CNN output for each position as a feature vector for LSTM.
+        # This requires reshaping or using TimeDistributed in a slightly different way.
+        
+        # For simpler PyTorch implementation given the standard Conv1D input (batch, channels, length):
+        # We will process the sequence with CNNs, then flatten the output into a single feature vector per sequence
+        # before feeding to LSTM if we want one output from LSTM for classification.
+        
+        # Let's reconsider the CNN-LSTM structure for clarity in PyTorch for sequence data.
+        # Option 1: CNN captures local features, then LSTM processes these features sequentially.
+        # The input to LSTM expects (batch, seq_len, features)
+        # So, after CNN, if output is (batch, filters, new_seq_len), permute to (batch, new_seq_len, filters)
+        
+        # Let's re-define the forward pass of the CNN part to prepare for LSTM
+        # The input x after embedding is (batch_size, seq_len, embedding_dim)
+        # Conv1d expects (batch_size, in_channels, seq_len)
+        # so we need x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1) # (batch_size, embedding_dim, seq_len)
+        
+        x = self.dropout1(self.pool1(F.relu(self.conv1(x)))) # Output: (batch_size, 128, seq_len_after_pool1)
+        x = self.dropout2(self.pool2(F.relu(self.conv2(x)))) # Output: (batch_size, 256, seq_len_after_pool2)
+        
+        # Prepare for LSTM: Permute back to (batch_size, seq_len_after_pool2, 256)
+        x = x.permute(0, 2, 1)
+        
+        # Pass through BiLSTM
+        lstm_out, _ = self.lstm(x) # lstm_out shape: (batch_size, seq_len_after_pool2, hidden_size * 2)
+        
+        # Take the output of the last timestep for classification (or pool, or attention)
+        # For `batch_first=True`, the last hidden state information is within `lstm_out`
+        # We can take the last element of the sequence or pool over the sequence.
+        # For BiLSTM, the hidden state combines forward and backward information, so we can take the last output.
+        # For sequence classification, often the output corresponding to the last element
+        # or an aggregated representation (e.g., mean/max pooling) is used.
+        # Let's take the last element, assuming it captures accumulated info.
+        x = lstm_out[:, -1, :] # Take the last hidden state of the LSTM output for each sequence in the batch
+        
+        x = self.dropout3(x)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x) # Final logits
+        
+        return x
+
+
+# Initialize the model
+VOCAB_SIZE = len(NUCLEOTIDES) + 1 # A, T, C, G + PAD
+EMBEDDING_DIM = 16 # Dimensionality of the nucleotide embeddings
+HIDDEN_DIM = 128 # Hidden dimension for LSTM and dense layers
+NUM_CLASSES = 2 # Binary classification (motif present/absent)
+
+model = DNAClassifier(VOCAB_SIZE, EMBEDDING_DIM, MAX_SEQUENCE_LENGTH, NUM_CLASSES)
+print("\n--- DNA Classifier Model Architecture Summary ---")
+print(model)
+
+# Move model to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+print(f"Using device: {device}")
+
+
+# --- Section 4: Training and Evaluation Loop ---
+# This section defines the training process, including loss function, optimizer,
+# and evaluation metrics.
+
+def train_and_evaluate_model(model, train_loader, val_loader, epochs=10, learning_rate=0.001, model_save_path='dna_classifier.pth'):
+    """
+    Trains and evaluates the DNA classification model.
+    """
+    print("\n--- Starting Model Training ---")
+
+    criterion = nn.CrossEntropyLoss() # Suitable for multi-class classification (logits input)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    train_losses, val_losses = [], []
+    train_accuracies, val_accuracies = [], []
+    best_val_accuracy = -1.0
+
+    for epoch in range(epochs):
+        model.train() # Set model to training mode
+        running_loss = 0.0
+        correct_train_predictions = 0
+        total_train_predictions = 0
+
+        for batch_idx, (sequences, labels) in enumerate(train_loader):
+            sequences, labels = sequences.to(device), labels.to(device)
+
+            optimizer.zero_grad() # Zero the parameter gradients
+
+            outputs = model(sequences) # Forward pass
+            loss = criterion(outputs, labels) # Calculate loss
+            loss.backward() # Backward pass
+            optimizer.step() # Optimize weights
+
+            running_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, 1)
+            total_train_predictions += labels.size(0)
+            correct_train_predictions += (predicted == labels).sum().item()
+
+        avg_train_loss = running_loss / len(train_loader)
+        train_accuracy = correct_train_predictions / total_train_predictions
+        train_losses.append(avg_train_loss)
+        train_accuracies.append(train_accuracy)
+
+        # Evaluation on validation set
+        model.eval() # Set model to evaluation mode
+        val_loss = 0.0
+        correct_val_predictions = 0
+        total_val_predictions = 0
+        val_true_labels, val_pred_labels, val_pred_probs = [], [], []
+
+        with torch.no_grad(): # Disable gradient calculation for validation
+            for sequences, labels in val_loader:
+                sequences, labels = sequences.to(device), labels.to(device)
+                outputs = model(sequences)
+                
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+
+                probabilities = F.softmax(outputs, dim=1)
+                _, predicted = torch.max(probabilities.data, 1)
+
+                total_val_predictions += labels.size(0)
+                correct_val_predictions += (predicted == labels).sum().item()
+                
+                val_true_labels.extend(labels.cpu().numpy())
+                val_pred_labels.extend(predicted.cpu().numpy())
+                val_pred_probs.extend(probabilities.cpu().numpy()[:, 1]) # Prob of positive class
+
+        avg_val_loss = val_loss / len(val_loader)
+        val_accuracy = correct_val_predictions / total_val_predictions
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(val_accuracy)
+
+        print(f"Epoch {epoch+1}/{epochs}: "
+              f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f} | "
+              f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+
+        # Save best model based on validation accuracy
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            torch.save(model.state_dict(), model_save_path)
+            print(f"  --> Model saved to {model_save_path} (Val Acc: {best_val_accuracy:.4f})")
+
+    print("\n--- Model Training Finished ---")
+
+    # Final evaluation metrics
+    precision, recall, f1, _ = precision_recall_fscore_support(val_true_labels, val_pred_labels, average='binary', zero_division=0)
+    try:
+        auc_score = roc_auc_score(val_true_labels, val_pred_probs)
+    except ValueError: # Handle cases where only one class is present in true labels
+        auc_score = 0.0
+        print("AUC could not be calculated (only one class present in true labels).")
+
+    print(f"\n--- Final Validation Metrics ---")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1-Score: {f1:.4f}")
+    print(f"ROC AUC: {auc_score:.4f}")
+
+    # Plotting training history
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Loss per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(train_accuracies, label='Train Accuracy')
+    plt.plot(val_accuracies, label='Validation Accuracy')
+    plt.title('Accuracy per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# --- Section 5: Inference on New Sequences ---
+# Demonstrates how to load a trained model and make predictions on new, unseen data.
+
+def predict_dna_sequence(model, sequence, max_len, actions_map):
+    """
+    Predicts the class of a single DNA sequence.
+    
+    Args:
+        model (nn.Module): The trained DNA classifier model.
+        sequence (str): The DNA sequence to classify.
+        max_len (int): The maximum sequence length used during training.
+        actions_map (list): List of class names corresponding to numerical labels.
+    Returns:
+        str: Predicted class label.
+        float: Confidence score for the predicted class.
+    """
+    model.eval() # Set model to evaluation mode
+    
+    # Preprocess the input sequence
+    indexed_seq = sequence_to_indices(sequence, max_len).unsqueeze(0).to(device) # Add batch dimension
+    
+    with torch.no_grad():
+        outputs = model(indexed_seq)
+        probabilities = F.softmax(outputs, dim=1) # Get probabilities
+    
+    # Get the predicted class and its confidence
+    predicted_prob, predicted_idx = torch.max(probabilities, 1)
+    
+    predicted_label = actions_map[predicted_idx.item()]
+    confidence = predicted_prob.item()
+
+    return predicted_label, confidence
+
+# --- Main Execution Flow ---
+if __name__ == '__main__':
+    # Define your classification task (e.g., motif detection)
+    # These parameters must match what's used in DummyDNADataset
+    CLASSIFICATION_ACTIONS = ['no_motif', 'motif_present']
+    MODEL_SAVE_PATH = 'dna_classifier.pth'
+    
+    # Step 1: Data Preparation (using dummy data for demonstration)
+    # If using real data, you would load your FASTA files, parse sequences,
+    # and create corresponding labels.
+    
+    # The `train_dataset` and `val_dataset` are already created above in Section 2.
+    
+    # Step 2: Model Training
+    # Ensure a GPU is enabled in your environment (e.g., Colab, PyTorch setup) for faster training.
+    print("\n--- Training the DNA Classifier ---")
+    train_and_evaluate_model(model, train_loader, val_loader, 
+                             epochs=50, # Adjust epochs based on convergence
+                             learning_rate=0.001, 
+                             model_save_path=MODEL_SAVE_PATH)
+
+    # Step 3: Load the best trained model for inference
+    print(f"\n--- Loading the best trained model from {MODEL_SAVE_PATH} ---")
+    model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
+    model.to(device) # Ensure model is on the correct device for inference
+
+    # Step 4: Make predictions on new, unseen sequences
+    print("\n--- Making Predictions on New Sequences ---")
+    
+    # Example 1: Sequence with the motif
+    test_seq_positive = "AAATATGCGGGTTTCCC" + "G" * (MAX_SEQUENCE_LENGTH - len("AAATATGCGGGTTTCCC"))
+    predicted_label_pos, confidence_pos = predict_dna_sequence(model, test_seq_positive, MAX_SEQUENCE_LENGTH, CLASSIFICATION_ACTIONS)
+    print(f"Sequence: '{test_seq_positive[:20]}...'")
+    print(f"Predicted Class: {predicted_label_pos} (Confidence: {confidence_pos:.4f})")
+
+    # Example 2: Sequence without the motif
+    test_seq_negative = "".join(random.choice(['A', 'C', 'G', 'T']) for _ in range(MAX_SEQUENCE_LENGTH))
+    # Replace any instance of the motif just to be sure for this test sequence
+    test_seq_negative = test_seq_negative.replace(MOTIF, "XXXXX") 
+    predicted_label_neg, confidence_neg = predict_dna_sequence(model, test_seq_negative, MAX_SEQUENCE_LENGTH, CLASSIFICATION_ACTIONS)
+    print(f"\nSequence: '{test_seq_negative[:20]}...'")
+    print(f"Predicted Class: {predicted_label_neg} (Confidence: {confidence_neg:.4f})")
+
+    # Example 3: Another random sequence
+    test_seq_random = "".join(random.choice(NUCLEOTIDES) for _ in range(MAX_SEQUENCE_LENGTH))
+    predicted_label_rand, confidence_rand = predict_dna_sequence(model, test_seq_random, MAX_SEQUENCE_LENGTH, CLASSIFICATION_ACTIONS)
+    print(f"\nSequence: '{test_seq_random[:20]}...'")
+    print(f"Predicted Class: {predicted_label_rand} (Confidence: {confidence_rand:.4f})")
+
+    print("\n--- End of DNA Sequence Classification Demo ---")
+
