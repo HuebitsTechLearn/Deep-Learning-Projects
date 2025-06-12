@@ -1,0 +1,324 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import faiss # For Approximate Nearest Neighbor (ANN) search
+from fastapi import FastAPI, UploadFile, File # For building the API
+from pydantic import BaseModel # For defining API request/response models
+import uvicorn # To run the FastAPI server
+import os
+import io
+from PIL import Image # For image handling (conceptual input to CNN)
+from torchvision import models, transforms # For using pre-trained ResNet
+
+# --- Configuration & Global Variables ---
+EMBEDDING_DIM = 512 # Dimension of the image embeddings (e.g., from ResNet's last layer)
+PRODUCT_CATALOG_SIZE = 1000 # Number of dummy products in our catalog
+MAX_PRODUCTS_TO_RETURN = 10 # Number of similar products to return in search results
+FAISS_INDEX_FILE = "product_embeddings.faiss" # File to save FAISS index
+
+# Dummy product data (replace with your actual product database/metadata)
+# In a real system, product_metadata would be loaded from a database (SQL, NoSQL, etc.)
+# This dictionary maps a conceptual product ID to its details.
+PRODUCT_METADATA = {
+    f"prod_{i:04d}": {
+        "name": f"Product {i} Item",
+        "price": round(random.uniform(10.0, 500.0), 2),
+        "category": random.choice(["Fashion", "Electronics", "Home Decor", "Books"]),
+        "image_url": f"https://placehold.co/128x128/00FF00/000?text=Product+{i}" # Placeholder image
+    }
+    for i in range(PRODUCT_CATALOG_SIZE)
+}
+
+# --- Section 1: Feature Extraction/Embedding (Conceptual with ResNet) ---
+# In a real visual search system, you'd use a pre-trained CNN (like ResNet)
+# to extract embeddings from actual product images.
+# Here, we show how to load a ResNet and conceptualize its embedding output.
+
+class ImageEncoder(nn.Module):
+    """
+    A conceptual Image Encoder using a pre-trained ResNet backbone.
+    In a real system, this would take an image, pass it through ResNet
+    (without its final classification layer), and return the feature vector.
+    """
+    def __init__(self, output_embedding_dim=EMBEDDING_DIM):
+        super(ImageEncoder, self).__init__()
+        # Load a pre-trained ResNet model (e.g., ResNet-18)
+        self.resnet = models.resnet18(pretrained=True)
+        # Remove the final classification layer
+        self.resnet.fc = nn.Identity() # Replaces the FC layer with an identity mapping
+
+        # Add a linear layer to map ResNet's output to our desired embedding dimension
+        # ResNet-18's last layer output is 512 features
+        self.embedding_layer = nn.Linear(512, output_embedding_dim)
+
+    def forward(self, x):
+        """
+        Args:
+            x (torch.Tensor): Input image tensor (e.g., from torchvision transforms).
+                              Shape: (batch_size, channels, height, width)
+        Returns:
+            torch.Tensor: Image embedding. Shape: (batch_size, output_embedding_dim)
+        """
+        # Pass through ResNet backbone
+        features = self.resnet(x)
+        # Get the final embedding
+        embedding = self.embedding_layer(features)
+        return F.normalize(embedding, p=2, dim=1) # Normalize to unit vector for cosine similarity
+
+# Define image transformation for ResNet input (common for ImageNet pre-trained models)
+preprocess_image = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# Conceptual function to get embeddings for the entire product catalog
+def generate_dummy_catalog_embeddings(num_products, embed_dim):
+    """
+    Generates dummy embeddings for a product catalog.
+    In a real system, you'd iterate through actual product images,
+    pass them through the ImageEncoder, and save their embeddings.
+    """
+    print(f"Generating {num_products} dummy product embeddings (dim={embed_dim})...")
+    embeddings = np.random.rand(num_products, embed_dim).astype('float32')
+    # Normalize embeddings to unit vectors (important for cosine similarity)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    
+    # Associate embeddings with product IDs
+    product_ids = list(PRODUCT_METADATA.keys())
+    # Ensure product_ids match the number of embeddings generated
+    if len(product_ids) != num_products:
+        print("Warning: Mismatch between product_metadata size and num_products.")
+        product_ids = [f"prod_{i:04d}" for i in range(num_products)]
+
+    catalog_embeddings = {
+        product_ids[i]: embeddings[i] for i in range(num_products)
+    }
+    print("Dummy catalog embeddings generated.")
+    return catalog_embeddings, embeddings # Return dict and raw array for FAISS
+
+
+# --- Section 2: Metric Learning (Conceptual Siamese Network Architecture) ---
+# A Siamese Network uses two or more identical subnetworks with shared weights.
+# It's trained to minimize the distance between embeddings of similar pairs
+# and maximize the distance between embeddings of dissimilar pairs.
+
+class SiameseNetwork(nn.Module):
+    """
+    A conceptual Siamese Network for metric learning.
+    It takes two inputs and processes them with a shared backbone (ImageEncoder).
+    The goal during training would be to learn embeddings where similar images
+    are close and dissimilar images are far apart in the embedding space.
+    """
+    def __init__(self, embedding_model):
+        super(SiameseNetwork, self).__init__()
+        self.backbone = embedding_model # This would be our ImageEncoder
+
+    def forward(self, input1, input2):
+        """
+        Args:
+            input1 (torch.Tensor): First image in the pair.
+            input2 (torch.Tensor): Second image in the pair.
+        Returns:
+            tuple: Embeddings for both input images.
+        """
+        output1 = self.backbone(input1)
+        output2 = self.backbone(input2)
+        return output1, output2
+
+# --- Example Usage for Conceptual Siamese Network ---
+# In a real scenario, you would train this SiameseNetwork with a contrastive
+# or triplet loss function on pairs/triplets of similar/dissimilar images.
+# This example just shows the architecture.
+dummy_image_encoder = ImageEncoder(output_embedding_dim=EMBEDDING_DIM)
+conceptual_siamese_net = SiameseNetwork(dummy_image_encoder)
+
+print("\n--- Conceptual Siamese Network Architecture ---")
+print(conceptual_siamese_net)
+print("\n(Note: This Siamese network would be trained with a custom loss")
+print("  (e.g., contrastive loss, triplet loss) on pairs/triplets of images")
+print("  to learn the similarity metric in the embedding space.)")
+
+
+# --- Section 3: Similarity Search with FAISS ---
+# FAISS is an efficient library for similarity search on large datasets of vectors.
+# We'll create an index, add our catalog embeddings, and query it.
+
+class VisualSearchIndex:
+    """
+    Manages the FAISS index for visual search.
+    """
+    def __init__(self, embedding_dim):
+        # Using an IndexFlatL2 for exact nearest neighbor search (for simplicity)
+        # For larger scale, consider Approximate Nearest Neighbor (ANN) indexes like IndexIVFFlat
+        self.index = faiss.IndexFlatL2(embedding_dim) 
+        self.product_ids = [] # To map FAISS index to original product IDs
+
+    def build_index(self, catalog_embeddings_array, product_ids_list):
+        """
+        Builds the FAISS index from catalog embeddings.
+        Args:
+            catalog_embeddings_array (np.array): NxEmbedding_dim array of embeddings.
+            product_ids_list (list): List of product IDs corresponding to the embeddings.
+        """
+        if not self.index.is_trained:
+            # IndexFlatL2 doesn't need training, but other indexes like IndexIVFFlat do
+            # self.index.train(catalog_embeddings_array) # For IndexIVFFlat
+            pass 
+        self.index.add(catalog_embeddings_array) # Add embeddings to the index
+        self.product_ids = product_ids_list
+        print(f"FAISS index built with {self.index.ntotal} embeddings.")
+
+    def search(self, query_embedding, k=MAX_PRODUCTS_TO_RETURN):
+        """
+        Performs a similarity search for a given query embedding.
+        Args:
+            query_embedding (np.array): 1xEmbedding_dim array of the query image embedding.
+            k (int): Number of nearest neighbors to return.
+        Returns:
+            list: List of (product_id, distance) tuples for the top k similar products.
+        """
+        D, I = self.index.search(query_embedding, k) # D: distances, I: indices
+        
+        results = []
+        for i in range(k):
+            if I[0][i] == -1: # FAISS returns -1 if not enough results
+                continue
+            product_id = self.product_ids[I[0][i]]
+            distance = D[0][i]
+            results.append({"product_id": product_id, "distance": float(distance), "details": PRODUCT_METADATA.get(product_id)})
+        return results
+
+    def save_index(self, filepath):
+        """Saves the FAISS index to a file."""
+        faiss.write_index(self.index, filepath)
+        print(f"FAISS index saved to {filepath}")
+
+    def load_index(self, filepath):
+        """Loads the FAISS index from a file."""
+        self.index = faiss.read_index(filepath)
+        print(f"FAISS index loaded from {filepath}")
+        # When loading, you also need to load the product_ids_list separately if not part of index.
+        # For this demo, we'll assume product_ids are reconstructed from PRODUCT_METADATA.
+
+
+# --- Section 4: FastAPI for API Development ---
+# This sets up a basic FastAPI application to serve the visual search.
+# It will have an endpoint to receive an image and return similar products.
+
+app = FastAPI(
+    title="Visual Search API for E-Commerce",
+    description="Find visually similar products by uploading an image.",
+    version="0.1.0"
+)
+
+# Initialize ImageEncoder (model for generating query embeddings)
+# In a real app, this would be loaded once at startup
+image_encoder_model = ImageEncoder(output_embedding_dim=EMBEDDING_DIM)
+image_encoder_model.eval() # Set to evaluation mode
+
+# Initialize FAISS index
+visual_search_faiss_index = VisualSearchIndex(EMBEDDING_DIM)
+
+# --- Pre-populate the FAISS index on startup ---
+@app.on_event("startup")
+async def startup_event():
+    print("API startup: Building/Loading FAISS index...")
+    global product_ids_list_for_faiss # Make it accessible globally
+
+    # In a real system:
+    # 1. Load actual product images from storage (e.g., S3, blob storage)
+    # 2. Generate embeddings for them using image_encoder_model (if not pre-computed)
+    # 3. Store mappings between product IDs and their embeddings.
+
+    # For this demo, use dummy embeddings
+    catalog_embeddings_dict, catalog_embeddings_array = generate_dummy_catalog_embeddings(
+        PRODUCT_CATALOG_SIZE, EMBEDDING_DIM
+    )
+    product_ids_list_for_faiss = list(catalog_embeddings_dict.keys()) # Store the ordered list
+
+    # Build FAISS index
+    visual_search_faiss_index.build_index(catalog_embeddings_array, product_ids_list_for_faiss)
+    
+    # Optional: Save the index to disk for persistence
+    # visual_search_faiss_index.save_index(FAISS_INDEX_FILE)
+    # If loading from file:
+    # visual_search_faiss_index.load_index(FAISS_INDEX_FILE)
+    # product_ids_list_for_faiss = list(PRODUCT_METADATA.keys()) # Ensure this matches loaded index
+
+    print("FAISS index ready for search queries.")
+
+
+# Define response model for search results
+class ProductResult(BaseModel):
+    product_id: str
+    distance: float
+    details: dict
+
+class SearchResponse(BaseModel):
+    query_image_embedding_shape: list
+    results: list[ProductResult]
+
+@app.post("/search/image/", response_model=SearchResponse)
+async def search_image(file: UploadFile = File(...)):
+    """
+    Endpoint to perform visual search by uploading an image.
+    Receives an image, generates its embedding, and finds similar products.
+    """
+    print(f"Received file: {file.filename}, Content-Type: {file.content_type}")
+    
+    try:
+        # Read image content
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
+        # Preprocess image for the model
+        input_tensor = preprocess_image(image)
+        input_batch = input_tensor.unsqueeze(0) # Add batch dimension
+        
+        # Generate embedding for the query image
+        # In a real system, move model to device (CPU/GPU)
+        query_embedding_tensor = image_encoder_model(input_batch)
+        query_embedding_np = query_embedding_tensor.squeeze(0).detach().cpu().numpy()
+        
+        # Reshape to (1, embedding_dim) for FAISS
+        query_embedding_for_faiss = query_embedding_np.reshape(1, -1)
+        
+        # Perform similarity search
+        results = visual_search_faiss_index.search(query_embedding_for_faiss, k=MAX_PRODUCTS_TO_RETURN)
+        
+        return SearchResponse(
+            query_image_embedding_shape=list(query_embedding_np.shape),
+            results=results
+        )
+    except Exception as e:
+        print(f"Error during image search: {e}")
+        # In a real app, you'd log this and return a more specific HTTPException
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.get("/")
+async def root():
+    return {"message": "Visual Search API is running. Go to /docs for API documentation."}
+
+# To run this FastAPI app, you would typically use:
+# uvicorn your_script_name:app --reload --host 0.0.0.0 --port 8000
+# (where your_script_name is the name of your Python file)
+
+# --- Main execution block for running the FastAPI app ---
+if __name__ == "__main__":
+    print("--- Starting Visual Search API (FastAPI) ---")
+    print("This will automatically generate a dummy catalog and build the FAISS index.")
+    print("\nAccess the API at: http://127.0.0.1:8000")
+    print("View API documentation (Swagger UI) at: http://127.0.0.1:8000/docs")
+    print("Upload an image to http://127.0.0.1:8000/search/image/ to test.")
+    
+    # Manually call startup_event for local testing to ensure index is built
+    # In a deployed Uvicorn/Gunicorn environment, this is handled automatically.
+    # We do this here to ensure the index is ready before uvicorn.run starts listening.
+    import asyncio
+    asyncio.run(startup_event()) # Call startup event to prepare the index
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
