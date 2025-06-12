@@ -1,0 +1,346 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import random
+from PIL import Image # For general image handling, including dummy data generation
+# import pydicom # Uncomment and install if you will be working with actual DICOM files
+# import SimpleITK as sitk # Uncomment and install for advanced medical image processing
+
+
+# --- Section 1: Conceptual Medical Image Handling & Data Preparation ---
+# This section demonstrates how you might prepare a medical image dataset.
+# Since real DICOM data is complex and large, we'll simulate a simple
+# dataset with dummy images and masks.
+
+# Define image dimensions
+IMG_HEIGHT = 128
+IMG_WIDTH = 128
+NUM_CHANNELS = 1 # Grayscale for X-rays/MRI slices
+
+class CustomMedicalDataset(Dataset):
+    """
+    A custom PyTorch Dataset for medical images (dummy data for demonstration).
+    In a real scenario, this would load actual medical images (e.g., DICOM, NIfTI)
+    and their corresponding segmentation masks.
+    """
+    def __init__(self, num_samples=100, transform=None):
+        self.num_samples = num_samples
+        self.transform = transform
+        self.images = []
+        self.masks = []
+        
+        # Simulate creating dummy images and masks
+        print(f"Generating {num_samples} dummy medical images and masks...")
+        for _ in range(num_samples):
+            # Create a random noise image (simulating an X-ray background)
+            image_array = np.random.rand(IMG_HEIGHT, IMG_WIDTH).astype(np.float32) * 0.1 # Dark background
+
+            # Create a dummy mask (e.g., a simple circle as a 'lesion')
+            mask_array = np.zeros((IMG_HEIGHT, IMG_WIDTH), dtype=np.float32)
+            
+            # Randomly place a circle (simulating a tumor/anomaly)
+            center_x = random.randint(IMG_WIDTH // 4, IMG_WIDTH * 3 // 4)
+            center_y = random.randint(IMG_HEIGHT // 4, IMG_HEIGHT * 3 // 4)
+            radius = random.randint(IMG_WIDTH // 8, IMG_WIDTH // 4)
+
+            # Draw a filled circle on the mask
+            for x in range(IMG_WIDTH):
+                for y in range(IMG_HEIGHT):
+                    if (x - center_x)**2 + (y - center_y)**2 < radius**2:
+                        mask_array[y, x] = 1.0 # Mark as lesion
+
+            # Add some 'texture' or 'signal' to the image where the mask is
+            image_array = image_array + mask_array * 0.8 # Make lesion brighter
+            image_array = np.clip(image_array, 0.0, 1.0) # Ensure values are within range
+
+            self.images.append(Image.fromarray((image_array * 255).astype(np.uint8))) # Convert to PIL Image
+            self.masks.append(Image.fromarray((mask_array * 255).astype(np.uint8)))   # Convert to PIL Image
+
+        print("Dummy data generation complete.")
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        mask = self.masks[idx]
+
+        if self.transform:
+            image = self.transform(image)
+            mask = self.transform(mask) # Apply same transforms to mask
+
+        return image, mask
+
+# Define transforms for the dataset
+# Normalization should be based on statistics of your actual medical images
+# For dummy data, we just convert to tensor.
+data_transforms = transforms.Compose([
+    transforms.Grayscale(num_output_channels=NUM_CHANNELS),
+    transforms.ToTensor(),
+    # transforms.Normalize(mean=[0.5], std=[0.5]) # Uncomment and adjust for real data
+])
+
+# Create a dummy dataset and DataLoader
+# In a real project, you'd have train_dataset, val_dataset, test_dataset
+dummy_dataset = CustomMedicalDataset(num_samples=200, transform=data_transforms)
+dummy_dataloader = DataLoader(dummy_dataset, batch_size=4, shuffle=True)
+
+print(f"Example batch shape (image, mask): {next(iter(dummy_dataloader))[0].shape}, {next(iter(dummy_dataloader))[1].shape}")
+
+
+# --- Section 2: U-Net Model Architecture for Segmentation ---
+# U-Net is an encoder-decoder architecture widely used for biomedical image segmentation.
+# It uses 'skip connections' to pass fine-grained details from the encoder to the decoder.
+
+class DoubleConv(nn.Module):
+    """(convolution => [BN] => ReLU) * 2"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+class Down(nn.Module):
+    """Downscaling with maxpool then double conv"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+class Up(nn.Module):
+    """Upscaling then double conv"""
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+
+        # if bilinear, use the normal convolutions to reduce the number of channels
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # Pad x1 if its size doesn't exactly match x2 due to upsampling
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        
+        x = torch.cat([x2, x1], dim=1) # Concatenate along the channel dimension
+        return self.conv(x)
+
+
+class OutConv(nn.Module):
+    """Final output convolution"""
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class UNet(nn.Module):
+    def __init__(self, n_channels, n_classes, bilinear=True):
+        super(UNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        self.down4 = Down(512, 1024)
+
+        self.up1 = Up(1024, 512, bilinear)
+        self.up2 = Up(512, 256, bilinear)
+        self.up3 = Up(256, 128, bilinear)
+        self.up4 = Up(128, 64, bilinear)
+        self.outc = OutConv(64, n_classes)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        logits = self.outc(x)
+        return logits
+
+# Initialize the U-Net model
+# n_channels=1 for grayscale medical images, n_classes=1 for binary segmentation (lesion/no-lesion)
+model = UNet(n_channels=NUM_CHANNELS, n_classes=1) 
+print("\n--- U-Net Model Architecture Summary ---")
+print(model)
+
+# Move model to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+print(f"Using device: {device}")
+
+
+# --- Section 3: Training Loop and Evaluation ---
+# This section defines the training process, including loss function, optimizer,
+# and evaluation metrics.
+
+def train_unet_model(model, dataloader, epochs=20, learning_rate=1e-4, model_save_path='unet_medical_segmentation.pth'):
+    """
+    Trains the U-Net model for image segmentation.
+    
+    Args:
+        model (nn.Module): The U-Net model to train.
+        dataloader (DataLoader): DataLoader for training data.
+        epochs (int): Number of training epochs.
+        learning_rate (float): Initial learning rate for the optimizer.
+        model_save_path (str): Path to save the best model weights.
+    """
+    print("\n--- Starting Model Training ---")
+
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Using BCEWithLogitsLoss for binary segmentation (outputting logits, not sigmoid)
+    criterion = nn.BCEWithLogitsLoss() 
+
+    best_loss = float('inf')
+
+    for epoch in range(epochs):
+        model.train() # Set model to training mode
+        running_loss = 0.0
+        for i, (images, masks) in enumerate(dataloader):
+            images, masks = images.to(device), masks.to(device)
+
+            optimizer.zero_grad() # Zero the gradients
+
+            outputs = model(images) # Forward pass
+            loss = criterion(outputs, masks) # Calculate loss
+            loss.backward() # Backward pass
+            optimizer.step() # Update weights
+
+            running_loss += loss.item()
+
+        avg_loss = running_loss / len(dataloader)
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
+
+        # Simple saving logic based on validation loss (here, just training loss for simplicity)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(model.state_dict(), model_save_path)
+            print(f"  --> Model saved: {model_save_path} (Loss: {best_loss:.4f})")
+
+    print("\n--- Model Training Finished ---")
+
+
+# --- Section 4: Prediction and Visualization ---
+# This section demonstrates how to load a trained model, make predictions,
+# and visualize the results (input image, ground truth, and prediction).
+
+def predict_and_visualize(model_path, dataset, num_samples=5):
+    """
+    Loads a trained model, makes predictions on a few samples from the dataset,
+    and visualizes the results.
+
+    Args:
+        model_path (str): Path to the saved model weights.
+        dataset (Dataset): The dataset to draw samples from.
+        num_samples (int): Number of samples to predict and visualize.
+    """
+    print("\n--- Starting Prediction and Visualization ---")
+
+    # Load the trained model weights
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval() # Set model to evaluation mode (disables dropout, batchnorm updates)
+
+    fig, axes = plt.subplots(num_samples, 3, figsize=(10, num_samples * 3))
+    fig.suptitle('Medical Image Segmentation Predictions', fontsize=16)
+
+    with torch.no_grad(): # Disable gradient calculations for inference
+        for i in range(num_samples):
+            # Get a random sample from the dataset
+            idx = random.randint(0, len(dataset) - 1)
+            image, true_mask = dataset[idx]
+            
+            # Add batch dimension and move to device
+            input_image = image.unsqueeze(0).to(device)
+
+            # Make prediction
+            output_mask = model(input_image)
+            
+            # Apply sigmoid and convert to numpy array for visualization (threshold at 0.5)
+            predicted_mask = torch.sigmoid(output_mask).squeeze().cpu().numpy()
+            predicted_mask_binary = (predicted_mask > 0.5).astype(np.float32)
+
+            # Convert original image and true mask to numpy for visualization
+            input_img_np = image.squeeze().cpu().numpy()
+            true_mask_np = true_mask.squeeze().cpu().numpy()
+
+            # Plotting
+            ax = axes[i, 0]
+            ax.imshow(input_img_np, cmap='gray')
+            ax.set_title(f'Input Image {idx+1}')
+            ax.axis('off')
+
+            ax = axes[i, 1]
+            ax.imshow(true_mask_np, cmap='gray')
+            ax.set_title('True Mask')
+            ax.axis('off')
+
+            ax = axes[i, 2]
+            ax.imshow(predicted_mask_binary, cmap='gray')
+            ax.set_title('Predicted Mask')
+            ax.axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
+    plt.show()
+    print("--- Prediction and Visualization Finished ---")
+
+
+# --- Main Execution Flow ---
+if __name__ == '__main__':
+    # --- Step 1: Prepare your data ---
+    # In a real scenario, you would organize your medical image files (e.g., DICOM folders)
+    # and their corresponding mask files (e.g., NIfTI, PNG masks) and modify CustomMedicalDataset
+    # to load them from disk.
+    
+    # For this example, we use a dummy dataset
+    train_dataset = CustomMedicalDataset(num_samples=500, transform=data_transforms)
+    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True) # Increased batch size for training
+
+    # Define model and training parameters
+    # The U-Net model was already initialized globally for brevity
+    model_save_file = 'unet_medical_segmentation.pth'
+    num_epochs = 50 # You might need more epochs for real data
+
+    # --- Step 2: Train the Model ---
+    # Ensure you have a GPU enabled if possible (PyTorch will use it automatically if found)
+    train_unet_model(model, train_dataloader, epochs=num_epochs, model_save_path=model_save_file)
+
+    # --- Step 3: Predict and Visualize Results ---
+    # Load the trained model and show some predictions.
+    # We use the same dataset for visualization, but ideally you'd use a separate test set.
+    predict_and_visualize(model_save_file, train_dataset, num_samples=5) # Visualize 5 random samples
