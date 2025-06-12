@@ -1,0 +1,311 @@
+import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+import numpy as np
+import cv2
+import os
+import subprocess # For calling FFmpeg
+import matplotlib.pyplot as plt
+import shutil # For cleaning up directories
+
+# --- Configuration ---
+VIDEO_PATH = "sample_video.mp4" # IMPORTANT: Replace with path to a small video file
+OUTPUT_DIR = "video_summarization_output"
+FRAMES_DIR = os.path.join(OUTPUT_DIR, "frames")
+AUDIO_DIR = os.path.join(OUTPUT_DIR, "audio")
+TEXT_DIR = os.path.join(OUTPUT_DIR, "transcripts")
+
+# Create output directories
+os.makedirs(FRAMES_DIR, exist_ok=True)
+os.makedirs(AUDIO_DIR, exist_ok=True)
+os.makedirs(TEXT_DIR, exist_ok=True)
+
+# --- Section 1: Video and Audio Extraction (FFmpeg & OpenCV) ---
+# This part of the code shows how to extract frames and audio from a video file.
+# FFmpeg is a powerful command-line tool for multimedia processing.
+
+def extract_frames(video_path, output_folder, fps=1):
+    """
+    Extracts frames from a video at a specified frame rate.
+    Args:
+        video_path (str): Path to the input video file.
+        output_folder (str): Directory to save extracted frames.
+        fps (int): Frames per second to extract.
+    """
+    print(f"Extracting frames from '{video_path}' to '{output_folder}'...")
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video file {video_path}.")
+        return
+
+    frame_count = 0
+    saved_frame_count = 0
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Extract frame based on desired FPS
+        if int(frame_count % (video_fps / fps)) == 0:
+            frame_filename = os.path.join(output_folder, f"frame_{saved_frame_count:05d}.jpg")
+            cv2.imwrite(frame_filename, frame)
+            saved_frame_count += 1
+        
+        frame_count += 1
+
+    cap.release()
+    print(f"Extracted {saved_frame_count} frames.")
+
+def extract_audio(video_path, output_audio_path):
+    """
+    Extracts audio from a video file using FFmpeg.
+    Args:
+        video_path (str): Path to the input video file.
+        output_audio_path (str): Path to save the extracted audio file (e.g., 'audio.mp3').
+    """
+    print(f"Extracting audio from '{video_path}' to '{output_audio_path}'...")
+    # Use subprocess to call FFmpeg
+    command = [
+        'ffmpeg',
+        '-i', video_path,
+        '-q:a', '0', # Variable bitrate, highest quality
+        '-map', 'a', # Only map audio stream
+        output_audio_path
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print("Audio extraction successful.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error during audio extraction: {e}")
+        print(f"FFmpeg stdout: {e.stdout.decode()}")
+        print(f"FFmpeg stderr: {e.stderr.decode()}")
+        print("Please ensure FFmpeg is installed and accessible in your system's PATH.")
+    except FileNotFoundError:
+        print("Error: FFmpeg not found. Please install FFmpeg and ensure it's in your system's PATH.")
+
+
+# --- Section 2: Audio Transcription (Conceptual `Whisper` Integration) ---
+# In a real project, you would use a library like OpenAI's Whisper or Google's Speech-to-Text API.
+# For this example, we'll simulate the output of transcription.
+
+def transcribe_audio_conceptual(audio_path, output_text_path):
+    """
+    Conceptually transcribes an audio file into text.
+    In a real application, this would use a robust ASR model (e.g., Whisper).
+    """
+    print(f"Conceptually transcribing audio from '{audio_path}'...")
+    
+    # Placeholder for actual ASR output
+    dummy_transcript = (
+        "This is a sample video demonstrating the capabilities of AI-powered summarization. "
+        "We are exploring how deep learning can understand video content. "
+        "The goal is to extract key moments and create concise summaries for various applications. "
+        "This technology has wide use cases in media, education, and content moderation."
+    )
+    
+    # Save the dummy transcript to a file
+    with open(output_text_path, 'w', encoding='utf-8') as f:
+        f.write(dummy_transcript)
+    print(f"Conceptual transcription saved to '{output_text_path}'. (Replace with actual ASR in real project)")
+
+# --- Section 3: Text Feature Extraction (HuggingFace Transformers BERT) ---
+# This uses a pre-trained BERT model to get embeddings for sentences/segments.
+# These embeddings capture the semantic meaning of the text.
+
+def get_sentence_embeddings(text_content):
+    """
+    Uses a pre-trained BERT model to get embeddings for sentences in the text.
+    Args:
+        text_content (str): The full text transcript.
+    Returns:
+        list of torch.Tensor: List of embeddings, one for each sentence.
+        list of str: List of original sentences.
+    """
+    print("Generating text embeddings using a pre-trained BERT model...")
+    # Load pre-trained BERT model and tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = AutoModel.from_pretrained("bert-base-uncased")
+    model.eval() # Set model to evaluation mode
+
+    sentences = text_content.split('. ') # Simple sentence splitting
+    sentence_embeddings = []
+    
+    with torch.no_grad():
+        for sentence in sentences:
+            if not sentence.strip(): # Skip empty sentences
+                continue
+            inputs = tokenizer(sentence, return_tensors="pt", truncation=True, padding=True)
+            outputs = model(**inputs)
+            # Take the [CLS] token embedding as the sentence embedding
+            sentence_embedding = outputs.last_hidden_state[:, 0, :].squeeze()
+            sentence_embeddings.append(sentence_embedding)
+    
+    print(f"Generated embeddings for {len(sentence_embeddings)} sentences.")
+    return sentence_embeddings, sentences
+
+# --- Section 4: Conceptual Salience Scoring and Extractive Summarization ---
+# This is a highly simplified conceptual approach. In a real system, a
+# deep learning model (e.g., another Transformer) would learn to predict
+# salience based on visual, audio, and text features combined.
+
+def calculate_salience_scores_conceptual(sentence_embeddings, frames_data):
+    """
+    Conceptually calculates salience scores for segments (here, sentences).
+    In a real system, this would be a multi-modal deep learning model's output.
+    
+    Args:
+        sentence_embeddings (list of torch.Tensor): Embeddings for each sentence.
+        frames_data (list): List of paths to extracted frames (for conceptual visual input).
+    Returns:
+        list of float: Salience score for each segment.
+    """
+    print("Conceptually calculating salience scores for segments...")
+    # For demonstration, we'll assign higher scores to longer sentences
+    # or sentences containing certain keywords.
+    salience_scores = []
+    keywords = ["AI", "deep learning", "summarization", "media", "education"]
+
+    for i, embedding in enumerate(sentence_embeddings):
+        sentence_text = sentences_for_scoring[i].lower()
+        score = embedding.norm().item() / 10 # Base score from embedding norm
+        
+        # Boost score if keywords are present
+        for kw in keywords:
+            if kw in sentence_text:
+                score += 0.5
+        
+        # Simple boost for position (e.g., beginning/end of document might be important)
+        if i < len(sentence_embeddings) * 0.1 or i > len(sentence_embeddings) * 0.9:
+            score += 0.2
+
+        salience_scores.append(score)
+    
+    print(f"Calculated {len(salience_scores)} conceptual salience scores.")
+    return salience_scores
+
+def select_keyframes_from_salience(salience_scores, original_frames_paths, summary_ratio=0.2):
+    """
+    Selects keyframes based on salience scores to form an extractive video summary.
+    
+    Args:
+        salience_scores (list): Scores indicating importance of each segment.
+        original_frames_paths (list): Sorted list of paths to all extracted frames.
+        summary_ratio (float): Desired ratio of summary length to original video length.
+    Returns:
+        list of str: Paths to selected keyframe images.
+    """
+    # Simple mapping: assume each sentence corresponds to a certain number of frames.
+    # This is a huge simplification; real systems map segments to video timecodes.
+    frames_per_segment = len(original_frames_paths) / len(salience_scores)
+    
+    indexed_scores = sorted(enumerate(salience_scores), key=lambda x: x[1], reverse=True)
+    
+    # Calculate how many segments to select
+    num_segments_to_select = int(len(salience_scores) * summary_ratio)
+    selected_segment_indices = sorted([idx for idx, _ in indexed_scores[:num_segments_to_select]])
+
+    selected_keyframes = []
+    # For each selected segment, pick a representative frame (e.g., the middle frame of its assumed range)
+    for seg_idx in selected_segment_indices:
+        start_frame_idx = int(seg_idx * frames_per_segment)
+        mid_frame_idx = int(start_frame_idx + frames_per_segment / 2)
+        mid_frame_idx = min(mid_frame_idx, len(original_frames_paths) - 1) # Ensure index is valid
+        selected_keyframes.append(original_frames_paths[mid_frame_idx])
+            
+    return selected_keyframes
+
+
+# --- Section 5: Visualization of Keyframes ---
+# Displays the selected keyframes to represent the visual summary.
+
+def display_keyframes(keyframes_paths, title="Selected Keyframes for Video Summary"):
+    """
+    Displays a grid of selected keyframes.
+    """
+    if not keyframes_paths:
+        print("No keyframes to display.")
+        return
+
+    num_keyframes = len(keyframes_paths)
+    cols = 5 # Number of columns in the display grid
+    rows = (num_keyframes + cols - 1) // cols # Calculate rows needed
+
+    plt.figure(figsize=(cols * 3, rows * 3)) # Adjust figure size based on grid
+    plt.suptitle(title, fontsize=16)
+
+    for i, frame_path in enumerate(keyframes_paths):
+        ax = plt.subplot(rows, cols, i + 1)
+        img = cv2.imread(frame_path)
+        if img is not None:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # Convert BGR to RGB for matplotlib
+            ax.imshow(img)
+            ax.set_title(os.path.basename(frame_path))
+            ax.axis('off')
+        else:
+            ax.set_title(f"Error loading {os.path.basename(frame_path)}")
+            ax.axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+    print("--- Keyframes Displayed ---")
+
+
+# --- Main Execution Flow ---
+if __name__ == '__main__':
+    # 1. Provide your video file
+    # Ensure 'sample_video.mp4' exists in the same directory as this script,
+    # or provide a full path. For demonstration, create a dummy video if you don't have one.
+    # A simple way to create a dummy video:
+    # Use your phone or webcam to record a short (10-30 second) video and name it "sample_video.mp4".
+    
+    if not os.path.exists(VIDEO_PATH):
+        print(f"Error: '{VIDEO_PATH}' not found.")
+        print("Please place a video file named 'sample_video.mp4' in the same directory as this script,")
+        print("or update the 'VIDEO_PATH' variable to its correct location.")
+        exit() # Exit if no video to process
+
+    # --- Step 1: Extract Frames and Audio ---
+    print("\n--- Processing Video for Summarization ---")
+    extract_frames(VIDEO_PATH, FRAMES_DIR, fps=1) # Extract 1 frame per second
+    audio_output_file = os.path.join(AUDIO_DIR, "extracted_audio.mp3")
+    extract_audio(VIDEO_PATH, audio_output_file)
+
+    # --- Step 2: Transcribe Audio (Conceptually) ---
+    transcript_output_file = os.path.join(TEXT_DIR, "transcript.txt")
+    transcribe_audio_conceptual(audio_output_file, transcript_output_file)
+    
+    # Read the generated transcript
+    with open(transcript_output_file, 'r', encoding='utf-8') as f:
+        full_transcript_text = f.read()
+
+    # --- Step 3: Get Text Embeddings ---
+    sentence_embeddings_list, sentences_for_scoring = get_sentence_embeddings(full_transcript_text)
+
+    # --- Step 4: Conceptually Score Salience and Select Keyframes ---
+    # This is where the core AI summarization logic (multi-modal learning) would be.
+    # For this conceptual example, we're using a simple text-based scoring.
+    
+    conceptual_salience_scores = calculate_salience_scores_conceptual(sentence_embeddings_list, os.listdir(FRAMES_DIR))
+    
+    # Get all extracted frame paths in sorted order
+    all_extracted_frames = sorted([os.path.join(FRAMES_DIR, f) for f in os.listdir(FRAMES_DIR) if f.endswith('.jpg')])
+
+    # Select keyframes based on the conceptual scores
+    summary_ratio = 0.2 # Summarize to 20% of original video length (conceptually)
+    selected_keyframes = select_keyframes_from_salience(conceptual_salience_scores, all_extracted_frames, summary_ratio=summary_ratio)
+    
+    print(f"\nSelected {len(selected_keyframes)} keyframes for summary.")
+
+    # --- Step 5: Visualize Selected Keyframes ---
+    display_keyframes(selected_keyframes, "Video Summary Keyframes")
+
+    # --- Cleanup ---
+    # Optional: Remove the created output directory after execution
+    # shutil.rmtree(OUTPUT_DIR)
+    # print(f"\nCleaned up output directory: {OUTPUT_DIR}")
+
