@@ -1,0 +1,401 @@
+Core Code Snippets for Protein Structure Prediction (Conceptual)
+Here are foundational examples for the key technical areas:
+
+1. Protein Sequence Representation: One-Hot Encoding and Simple Embedding
+This snippet shows how to convert an amino acid sequence into numerical formats suitable for deep learning models.
+
+Python
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+# Define all 20 standard amino acids (case-insensitive for robustness)
+AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
+AA_TO_INT = {aa: i for i, aa in enumerate(AMINO_ACIDS)}
+INT_TO_AA = {i: aa for aa, i in AA_TO_INT.items()}
+
+def sequence_to_one_hot(sequence, max_len=None):
+    """
+    Converts an amino acid sequence to a one-hot encoded representation.
+    
+    Args:
+        sequence (str): The amino acid sequence (e.g., "MDR").
+        max_len (int, optional): Maximum length for padding/truncation.
+                                 If None, uses actual sequence length.
+    Returns:
+        torch.Tensor: One-hot encoded tensor of shape (max_len, 20).
+    """
+    seq_len = len(sequence)
+    if max_len is None:
+        actual_len = seq_len
+    else:
+        actual_len = min(seq_len, max_len)
+
+    one_hot_tensor = torch.zeros(actual_len, len(AMINO_ACIDS))
+    for i in range(actual_len):
+        aa = sequence[i].upper()
+        if aa in AA_TO_INT:
+            one_hot_tensor[i, AA_TO_INT[aa]] = 1
+        # Amino acids not in AMINO_ACIDS (e.g., 'X' for unknown) will remain all zeros
+    
+    # Pad if max_len is specified and sequence is shorter
+    if max_len is not None and seq_len < max_len:
+        padding = torch.zeros(max_len - seq_len, len(AMINO_ACIDS))
+        one_hot_tensor = torch.cat((one_hot_tensor, padding), dim=0)
+
+    return one_hot_tensor
+
+def sequence_to_indices(sequence, max_len=None):
+    """
+    Converts an amino acid sequence to a list of integer indices.
+    
+    Args:
+        sequence (str): The amino acid sequence.
+        max_len (int, optional): Maximum length for padding/truncation.
+    Returns:
+        torch.Tensor: Tensor of integer indices.
+    """
+    indices = [AA_TO_INT.get(aa.upper(), len(AMINO_ACIDS)) for aa in sequence] # Use 20 for unknown/padding
+    
+    if max_len is not None:
+        if len(indices) > max_len:
+            indices = indices[:max_len]
+        elif len(indices) < max_len:
+            indices.extend([len(AMINO_ACIDS)] * (max_len - len(indices))) # Pad with index for 'unknown'
+
+    return torch.tensor(indices, dtype=torch.long)
+
+# --- Example Usage ---
+sample_sequence = "MDRCK"
+max_sequence_length = 10 # Example max length for batching
+
+print(f"Original sequence: {sample_sequence}")
+
+# 1. One-hot encoding
+one_hot_representation = sequence_to_one_hot(sample_sequence, max_len=max_sequence_length)
+print(f"\nOne-hot representation (shape {one_hot_representation.shape}):\n{one_hot_representation}")
+
+# 2. Integer indices for embedding layer
+indexed_sequence = sequence_to_indices(sample_sequence, max_len=max_sequence_length)
+print(f"\nIndexed sequence for embedding (shape {indexed_sequence.shape}):\n{indexed_sequence}")
+
+# 3. PyTorch Embedding Layer
+# Create an embedding layer: vocab_size=21 (20 AAs + 1 for padding/unknown), embedding_dim=32
+embedding_dim = 32
+embedding_layer = nn.Embedding(num_embeddings=len(AMINO_ACIDS) + 1, embedding_dim=embedding_dim, padding_idx=len(AMINO_ACIDS))
+
+# Apply embedding to the indexed sequence
+embedded_sequence = embedding_layer(indexed_sequence)
+print(f"\nEmbedded sequence (shape {embedded_sequence.shape}):\n{embedded_sequence}")
+
+# You would typically pass these embeddings to subsequent layers like LSTMs, CNNs, or Transformers.
+2. Conceptual Graph Representation (as a prelude to GNNs)
+Representing a protein as a graph is crucial for GNNs. This is a conceptual illustration of how nodes (amino acids) and edges (interactions) could be set up. A full GNN implementation would use libraries like PyTorch Geometric or DGL.
+
+Python
+
+# Conceptual representation of a protein as a graph
+# In a real scenario, 'edges' would represent various types of interactions
+# (e.g., covalent bonds, residue-residue contacts based on distance in 3D).
+
+class ProteinGraph:
+    def __init__(self, sequence):
+        self.sequence = sequence.upper()
+        self.num_residues = len(self.sequence)
+        self.nodes = [(i, aa) for i, aa in enumerate(self.sequence)] # (index, amino_acid)
+        self.edges = [] # List of (node1_idx, node2_idx, edge_type)
+
+    def add_peptide_bonds(self):
+        """Adds bonds between consecutive amino acids (backbone)."""
+        for i in range(self.num_residues - 1):
+            self.edges.append((i, i + 1, 'peptide_bond'))
+
+    def add_conceptual_contacts(self, cutoff_distance_angstroms=8.0):
+        """
+        Adds conceptual non-covalent contacts.
+        In a real scenario, this would be based on predicted 3D distances.
+        Here, it's just a placeholder for potential interactions.
+        """
+        print(f"Adding conceptual contacts (e.g., from predicted distance map)...")
+        # For demonstration, let's assume some arbitrary contacts
+        # In reality, this comes from complex prediction.
+        if self.num_residues > 5:
+            self.edges.append((0, 4, 'distant_contact')) # Example: 1st and 5th residue might be close
+            self.edges.append((1, 5, 'distant_contact'))
+            # ... more complex logic to identify contacts
+        print("  (Note: Actual contacts derived from predicted 3D coordinates or evolutionary coupling)")
+
+    def display_conceptual_graph(self):
+        print(f"\n--- Conceptual Protein Graph for '{self.sequence}' ---")
+        print(f"Nodes (Residues): {self.nodes}")
+        print(f"Edges (Interactions): {self.edges}")
+        print("-------------------------------------------------")
+
+# --- Example Usage ---
+sample_protein_sequence = "MDRCKYTRQ"
+protein_graph = ProteinGraph(sample_protein_sequence)
+protein_graph.add_peptide_bonds()
+protein_graph.add_conceptual_contacts() # This would be where your DL model's output influences edges
+protein_graph.display_conceptual_graph()
+
+# For actual GNNs, you would use PyTorch Geometric or DGL's graph data structures
+# and build message-passing layers to learn from these graphs.
+3. Simplified Self-Attention Layer (PyTorch)
+This custom nn.Module demonstrates the core idea of a self-attention mechanism, which is fundamental to Transformers and Evoformer-like architectures. This allows the model to weigh the importance of different amino acids when processing a sequence.
+
+Python
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SimpleSelfAttention(nn.Module):
+    def __init__(self, embed_dim):
+        """
+        A very simplified self-attention mechanism.
+        This does not include multi-head attention, positional encoding,
+        or complex feed-forward networks found in full Transformers.
+        
+        Args:
+            embed_dim (int): The dimensionality of the input feature vectors (embeddings).
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        
+        # Linear transformations for Query, Key, Value
+        self.query_transform = nn.Linear(embed_dim, embed_dim)
+        self.key_transform = nn.Linear(embed_dim, embed_dim)
+        self.value_transform = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, x):
+        """
+        Args:
+            x (torch.Tensor): Input tensor, typically sequence embeddings.
+                              Shape: (batch_size, sequence_length, embed_dim)
+        Returns:
+            torch.Tensor: Output tensor with attention applied.
+                          Shape: (batch_size, sequence_length, embed_dim)
+        """
+        # Apply linear transformations
+        queries = self.query_transform(x) # (batch_size, seq_len, embed_dim)
+        keys = self.key_transform(x)    # (batch_size, seq_len, embed_dim)
+        values = self.value_transform(x) # (batch_size, seq_len, embed_dim)
+        
+        # Calculate attention scores: Query dot Key (scaled)
+        # (batch_size, seq_len, embed_dim) @ (batch_size, embed_dim, seq_len)
+        # = (batch_size, seq_len, seq_len)
+        attention_scores = torch.matmul(queries, keys.transpose(-2, -1)) / (self.embed_dim ** 0.5)
+        
+        # Apply softmax to get attention weights
+        attention_weights = F.softmax(attention_scores, dim=-1) # Sums to 1 along the last dim
+        
+        # Apply attention weights to Values
+        # (batch_size, seq_len, seq_len) @ (batch_size, seq_len, embed_dim)
+        # = (batch_size, seq_len, embed_dim)
+        attended_output = torch.matmul(attention_weights, values)
+        
+        return attended_output
+
+# --- Example Usage ---
+# Assume batch_size=1, sequence_length=10, embed_dim=32
+batch_size = 1
+sequence_length = 10
+embedding_dimension = 32
+
+# Create a dummy input tensor (e.g., from an embedding layer)
+dummy_input_embeddings = torch.randn(batch_size, sequence_length, embedding_dimension)
+
+# Instantiate the attention layer
+attention_layer = SimpleSelfAttention(embedding_dimension)
+
+# Pass the dummy embeddings through the attention layer
+output_with_attention = attention_layer(dummy_input_embeddings)
+
+print(f"Dummy input embeddings shape: {dummy_input_embeddings.shape}")
+print(f"Output after simple self-attention shape: {output_with_attention.shape}")
+print("\n(Note: A full Transformer block would include multi-head attention,")
+print("  add & norm, and feed-forward networks, typically stacked.)")
+4. Dummy "Prediction" Model Architecture (PyTorch)
+This is a very simplified PyTorch model. It demonstrates how you might combine embeddings and attention, but its "prediction" is a placeholder for actual 3D coordinate or distance map output, which is highly complex in a real protein structure predictor.
+
+Python
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Re-using the AMINO_ACIDS and AA_TO_INT from Section 1
+AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
+AA_TO_INT = {aa: i for i, aa in enumerate(AMINO_ACIDS)}
+
+# Re-using SimpleSelfAttention from Section 3
+class SimpleSelfAttention(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.query_transform = nn.Linear(embed_dim, embed_dim)
+        self.key_transform = nn.Linear(embed_dim, embed_dim)
+        self.value_transform = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, x):
+        queries = self.query_transform(x)
+        keys = self.key_transform(x)
+        values = self.value_transform(x)
+        attention_scores = torch.matmul(queries, keys.transpose(-2, -1)) / (self.embed_dim ** 0.5)
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        attended_output = torch.matmul(attention_weights, values)
+        return attended_output
+
+class DummyProteinPredictor(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, num_attention_layers=2):
+        """
+        A conceptual deep learning model for protein prediction.
+        This model demonstrates sequence embedding, attention, and a
+        linear output layer.
+        
+        Args:
+            vocab_size (int): Number of unique amino acids + 1 for padding.
+            embed_dim (int): Dimension of amino acid embeddings.
+            hidden_dim (int): Dimension of hidden layers.
+            output_dim (int): The size of the final prediction output.
+                              In a real protein predictor, this would be complex
+                              (e.g., inter-residue distances, orientations, or coordinates).
+            num_attention_layers (int): Number of simple attention blocks to stack.
+        """
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        
+        # Stack simple attention layers
+        self.attention_blocks = nn.ModuleList([
+            SimpleSelfAttention(embed_dim) for _ in range(num_attention_layers)
+        ])
+        
+        # You might also include other layers here like CNNs or LSTMs
+        # self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+
+        # Output layer. For a conceptual model, let's predict 'contact likelihood'
+        # for simplicity. A full model outputs complex distance matrices or coordinates.
+        # If output_dim is (sequence_length * sequence_length), it could be contact map
+        self.fc_out = nn.Linear(embed_dim, output_dim) 
+
+    def forward(self, sequence_indices):
+        """
+        Args:
+            sequence_indices (torch.Tensor): Batch of integer-encoded protein sequences.
+                                             Shape: (batch_size, sequence_length)
+        Returns:
+            torch.Tensor: Conceptual prediction output.
+        """
+        # 1. Embed the sequence
+        embeddings = self.embedding(sequence_indices) # (batch_size, seq_len, embed_dim)
+        
+        # 2. Pass through attention blocks
+        x = embeddings
+        for attention_layer in self.attention_blocks:
+            x = attention_layer(x) # (batch_size, seq_len, embed_dim)
+            # In real Transformers, there's also Add&Norm and FeedForward after attention
+
+        # 3. Aggregate information or predict per-residue features
+        # For a simple output, let's take the average of all residue embeddings
+        # Or you could flatten and pass through more layers
+        aggregated_features = torch.mean(x, dim=1) # (batch_size, embed_dim)
+
+        # 4. Final prediction layer
+        # This output would be highly specific to what you're predicting (distances, angles, etc.)
+        prediction = self.fc_out(aggregated_features) # (batch_size, output_dim)
+        
+        return prediction
+
+# --- Example Usage ---
+# Parameters for the dummy model
+vocab_size = len(AMINO_ACIDS) + 1 # 20 amino acids + 1 for padding/unknown
+embedding_dim = 64
+hidden_dim = 128
+# Let's say we want to predict a vector of 'interaction scores' for a protein
+# For a protein of length 10, maybe we predict 10x10 distances (100 values)
+output_dim_example = 100 # Represents conceptual output, e.g., features for a contact map
+num_attention_layers_example = 2
+
+# Instantiate the model
+dummy_model = DummyProteinPredictor(vocab_size, embedding_dim, hidden_dim, output_dim_example, num_attention_layers_example)
+print("\n--- Dummy Protein Predictor Model Summary ---")
+print(dummy_model)
+
+# Create a dummy batch of sequences
+# Batch size 4, sequence length 10
+dummy_sequences = torch.randint(0, len(AMINO_ACIDS), (4, 10)) 
+
+# Forward pass
+dummy_output = dummy_model(dummy_sequences)
+
+print(f"\nDummy input sequence batch shape: {dummy_sequences.shape}")
+print(f"Dummy model output shape: {dummy_output.shape}")
+print("\n(IMPORTANT: This model's output is conceptual. Converting it to accurate 3D coordinates")
+print("  is the most complex part of protein structure prediction, involving sophisticated")
+print("  geometric transformations, energy minimization, and iterative refinement.)")
+
+5. 3D Visualization with NGLView (in Jupyter/Colab)
+This snippet demonstrates how to interactively visualize a protein's 3D structure using nglview within a Jupyter Notebook or Google Colab environment. You'll typically load a .pdb (Protein Data Bank) file, which contains experimentally determined or previously predicted protein structures.
+
+To run this, you need to be in a Jupyter Notebook or Google Colab environment.
+
+Python
+
+# To install in Colab or Jupyter:
+# !pip install nglview biopython ipywidgets # ipywidgets is often needed for NGLView interactivity
+
+import nglview as nv
+from Bio.PDB import PDBList # To download example PDB files
+import os
+
+def visualize_protein_structure(pdb_id='1TUP'):
+    """
+    Downloads a PDB file and visualizes its 3D structure interactively using NGLView.
+    
+    Args:
+        pdb_id (str): The PDB ID of the protein to download and visualize (e.g., '1TUP' for AlphaFold's first structure).
+    """
+    print(f"\n--- 3D Protein Structure Visualization with NGLView ---")
+    print(f"Downloading PDB ID: {pdb_id}...")
+
+    pdbl = PDBList()
+    try:
+        # Download the PDB file to the current directory
+        pdb_file = pdbl.retrieve_pdb_file(pdb_id, pdir='.', overwrite=True)
+        print(f"Downloaded: {pdb_file}")
+    except Exception as e:
+        print(f"Error downloading PDB file for {pdb_id}: {e}")
+        print("Please check PDB ID or internet connection.")
+        return
+
+    # Create an NGLView widget from the PDB file
+    try:
+        view = nv.show_pdbid(pdb_id) # NGLView can often fetch directly, but using local file is robust
+        # Or, if you prefer to load the local file:
+        # view = nv.show_structure_file(pdb_file, default_representation=False)
+        
+        # Customize visualization (optional)
+        view.add_representation('cartoon', color='s_ss') # Common representation for backbone
+        view.add_representation('ball+stick', selection='hetero', color='purple') # Show ligands/waters
+        view.add_representation('licorice', selection='sidechain') # Show side chains
+        
+        # Display the viewer
+        print(f"\nDisplaying 3D structure for {pdb_id}. Interact with the viewer below.")
+        return view
+    except Exception as e:
+        print(f"Error visualizing PDB ID {pdb_id}: {e}")
+        print("Ensure NGLView is correctly installed and running in a Jupyter/Colab environment.")
+
+# --- Example Usage (Run this cell in Jupyter/Colab) ---
+# You can try famous PDBs like '1CRN' (crambin, small protein) or '1TUP' (a larger one)
+# or even AlphaFold's generated structures (though their specific PDB IDs might vary or be in AlphaFold DB)
+# For AlphaFold, you might download from AlphaFold DB directly or use a PDB ID of an experimentally verified structure.
+# Example AlphaFold PDB ID: "AF-O15305-F1-model_v4.pdb" from AlphaFold DB, but you'd need to download it first.
+# Let's use a standard PDB ID for demonstration.
+
+# view_widget = visualize_protein_structure(pdb_id='1CRN') # A small, well-known protein
+# If running, this will display the interactive viewer.
+# You can also use a protein that might be more relevant to your interests.
+# For example, a common PDB ID for a human protein: '4HHB' (Hemoglobin)
+view_widget = visualize_protein_structure(pdb_id='4HHB')
