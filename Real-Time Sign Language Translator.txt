@@ -1,0 +1,507 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import os
+import time
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Flatten, TimeDistributed, Conv1D, MaxPooling1D
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from gtts import gTTS # Google Text-to-Speech for output
+import pygame # For playing audio
+
+# --- Section 1: Real-time Hand Landmark Detection using MediaPipe and OpenCV ---
+# This part of the code initializes MediaPipe for hand detection and visualizes
+# the landmarks on a live webcam feed. This is the foundation for extracting
+# the 'visual' input for your sign language model.
+
+def run_hand_detection():
+    """
+    Captures live webcam feed, detects hand landmarks using MediaPipe,
+    and displays them. Press 'q' to quit.
+    """
+    print("--- Starting Hand Landmark Detection ---")
+    print("This displays live hand tracking. Use 'q' to quit and proceed.")
+
+    # Initialize MediaPipe Hands module
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False,        # Treat images as video stream
+        max_num_hands=2,                # Detect up to 2 hands
+        min_detection_confidence=0.7,   # Minimum confidence for hand detection
+        min_tracking_confidence=0.5     # Minimum confidence for hand tracking
+    )
+    mp_drawing = mp.solutions.drawing_utils # Utility for drawing landmarks
+
+    # Open webcam
+    cap = cv2.VideoCapture(0) # 0 is the default webcam ID
+
+    if not cap.isOpened():
+        print("Error: Could not open video stream. Please check webcam connection.")
+        return
+
+    prev_frame_time = 0
+    new_frame_time = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame.")
+            break
+
+        # Flip the frame horizontally for a mirrored view (common for webcams)
+        frame = cv2.flip(frame, 1)
+
+        # Convert the BGR image from OpenCV to RGB (MediaPipe requires RGB)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Process the frame with MediaPipe Hands to detect landmarks
+        results = hands.process(rgb_frame)
+
+        # Draw hand landmarks on the original frame
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2), # Red dots
+                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2) # Green lines
+                )
+                
+                # Example: Accessing coordinates of a specific landmark (e.g., wrist)
+                # wrist_x = int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x * frame.shape[1])
+                # wrist_y = int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].y * frame.shape[0])
+                # cv2.circle(frame, (wrist_x, wrist_y), 5, (255, 0, 0), -1) # Blue circle on wrist
+
+        # Calculate and display FPS (Frames Per Second)
+        new_frame_time = time.time()
+        fps = 1 / (new_frame_time - prev_frame_time)
+        prev_frame_time = new_frame_time
+        fps_text = f"FPS: {int(fps)}"
+        cv2.putText(frame, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Display the frame in a window
+        cv2.imshow('Sign Language Translator (Hand Detection)', frame)
+
+        # Break the loop if 'q' key is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+    hands.close()
+    print("--- Hand Landmark Detection Finished ---")
+
+
+# --- Section 2: Feature Extraction and Data Preparation for Deep Learning ---
+# This part of the code automates the process of collecting sequential landmark
+# data for various sign language gestures. This data will be used to train
+# the deep learning model.
+#
+# IMPORTANT: You need to perform the signs clearly in front of the camera
+# during this data collection phase.
+
+def collect_sign_language_data(actions_to_collect, num_sequences_per_action=30, frames_per_sequence=30):
+    """
+    Collects hand landmark data for specified sign language actions.
+    Data is saved as NumPy arrays in a structured directory.
+
+    Args:
+        actions_to_collect (list): List of strings, where each string is a sign/word.
+        num_sequences_per_action (int): Number of video sequences to collect for each action.
+        frames_per_sequence (int): Number of frames (time steps) in each sequence.
+    """
+    print("\n--- Starting Data Collection for Training ---")
+    print(f"Collecting data for: {actions_to_collect}")
+    print(f"Each action will have {num_sequences_per_action} sequences, each with {frames_per_sequence} frames.")
+    print("Follow the on-screen prompts. Ensure clear hand visibility and good lighting.")
+
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1, # Focus on single hand for specific sign gestures
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5
+    )
+
+    DATA_PATH = os.path.join('MP_Data') # Directory to store collected data
+
+    # Create directories for each action and sequence if they don't exist
+    for action in actions_to_collect:
+        for sequence in range(num_sequences_per_action):
+            os.makedirs(os.path.join(DATA_PATH, action, str(sequence)), exist_ok=True)
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Error: Could not open video stream. Please check webcam connection.")
+        return
+
+    for action in actions_to_collect:
+        print(f"\nGET READY TO PERFORM: '{action.upper()}'")
+        time.sleep(3) # Give user time to prepare
+
+        for sequence_idx in range(num_sequences_per_action):
+            # Display countdown before starting sequence
+            for timer in range(3, 0, -1):
+                ret, frame = cap.read()
+                if not ret: break
+                frame = cv2.flip(frame, 1)
+                cv2.putText(frame, f'Starting {action} Sequence {sequence_idx+1} in {timer}...', (15, 200),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 4, cv2.LINE_AA)
+                cv2.imshow('Data Collection', frame)
+                cv2.waitKey(500)
+
+            window_data = [] # To store keypoints for the current sequence
+            for frame_idx in range(frames_per_sequence):
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to grab frame during data collection.")
+                    break
+
+                frame = cv2.flip(frame, 1) # Mirror image
+
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = hands.process(rgb_frame)
+
+                keypoints = []
+                if results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        for lm in hand_landmarks.landmark:
+                            # Store x, y, z coordinates for each landmark (21 landmarks * 3 coords = 63 features)
+                            keypoints.extend([lm.x, lm.y, lm.z])
+                else:
+                    # If no hand detected, fill with zeros. This assumes a fixed input size.
+                    keypoints = list(np.zeros(21 * 3))
+
+                # Display instructions and progress
+                cv2.putText(frame, f'Action: {action} | Sequence: {sequence_idx+1}/{num_sequences_per_action}', (15, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.putText(frame, f'Frame: {frame_idx+1}/{frames_per_sequence}', (15, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2, cv2.LINE_AA)
+
+                cv2.imshow('Data Collection', frame)
+                
+                # Save the keypoints for the current frame
+                npy_path = os.path.join(DATA_PATH, action, str(sequence_idx), f"{frame_idx}")
+                np.save(npy_path, np.array(keypoints))
+
+                # Small delay to ensure smooth capture and give user time to hold pose
+                time.sleep(0.01)
+
+                # Break loop if 'q' is pressed (can be used to prematurely stop collection)
+                if cv2.waitKey(10) & 0xFF == ord('q'):
+                    print("Data collection interrupted by user.")
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    hands.close()
+                    return
+
+            print(f"  Finished sequence {sequence_idx+1} for '{action}'")
+            time.sleep(1) # Short break between sequences
+
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+    hands.close()
+    print("--- Data Collection Finished ---")
+
+
+# --- Section 3: Building and Training the CNN-LSTM Deep Learning Model ---
+# This code defines, compiles, and trains a CNN-LSTM model using TensorFlow/Keras.
+# It reads the data collected in the previous step.
+
+def train_sign_language_model(actions_list, model_save_path='sign_language_model.h5',
+                               num_sequences=30, sequence_length=30):
+    """
+    Loads collected data, builds a CNN-LSTM model, and trains it.
+
+    Args:
+        actions_list (list): List of strings, defining the actions/signs.
+                             MUST match the 'actions_to_collect' used in data collection.
+        model_save_path (str): File path to save the trained model.
+        num_sequences (int): Number of sequences per action (from data collection).
+        sequence_length (int): Number of frames per sequence (from data collection).
+    """
+    print("\n--- Starting Model Training ---")
+
+    DATA_PATH = os.path.join('MP_Data') # Directory where data was saved
+
+    # Create a mapping from action names to numerical labels
+    label_map = {label:num for num, label in enumerate(actions_list)}
+
+    # Load data from saved NumPy files
+    sequences, labels = [], []
+    for action in actions_list:
+        for sequence_idx in range(num_sequences):
+            window = [] # Represents one full sequence of frames
+            for frame_idx in range(sequence_length):
+                npy_file_path = os.path.join(DATA_PATH, action, str(sequence_idx), f"{frame_idx}.npy")
+                if os.path.exists(npy_file_path):
+                    res = np.load(npy_file_path)
+                    window.append(res)
+                else:
+                    print(f"Warning: Missing data file: {npy_file_path}. Skipping.")
+                    window.append(np.zeros(21 * 3)) # Append zeros if file missing
+            sequences.append(window)
+            labels.append(label_map[action])
+
+    X = np.array(sequences)
+    y = to_categorical(labels).astype(int) # One-hot encode labels
+
+    # Split data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    # Reshape X_train and X_test to add a channel dimension for Conv1D (e.g., (batch, timesteps, features, 1))
+    X_train_reshaped = np.expand_dims(X_train, axis=-1)
+    X_test_reshaped = np.expand_dims(X_test, axis=-1)
+
+    print(f"Loaded X_train shape: {X_train_reshaped.shape}")
+    print(f"Loaded y_train shape: {y_train.shape}")
+    print(f"Number of classes: {len(actions_list)}")
+
+    # --- Build the CNN-LSTM Model ---
+    # This architecture is suitable for sequential data where local features
+    # (from CNN) and temporal dependencies (from LSTM) are important.
+    model = Sequential()
+
+    # TimeDistributed ensures Conv1D is applied independently to each frame in the sequence
+    model.add(TimeDistributed(Conv1D(filters=64, kernel_size=5, activation='relu', padding='same'),
+                              input_shape=(sequence_length, X.shape[2], 1)))
+    model.add(TimeDistributed(MaxPooling1D(pool_size=2)))
+    model.add(TimeDistributed(Dropout(0.2))) # Added dropout for regularization
+    model.add(TimeDistributed(Conv1D(filters=128, kernel_size=3, activation='relu', padding='same')))
+    model.add(TimeDistributed(MaxPooling1D(pool_size=2)))
+    model.add(TimeDistributed(Dropout(0.2)))
+    model.add(TimeDistributed(Flatten())) # Flatten the output of Conv1D for LSTM input
+
+    # LSTM layers for learning temporal patterns across frames
+    model.add(LSTM(256, return_sequences=True, activation='relu'))
+    model.add(Dropout(0.3))
+    model.add(LSTM(128, return_sequences=False, activation='relu')) # Last LSTM doesn't return sequences
+    
+    # Dense layers for final classification
+    model.add(Dense(64, activation='relu'))
+    model.add(Dropout(0.2))
+    model.add(Dense(len(actions_list), activation='softmax')) # Softmax for multi-class classification
+
+    model.summary()
+
+    # --- Compile the Model ---
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['categorical_accuracy'])
+
+    # --- Callbacks for Training ---
+    # ModelCheckpoint: Saves the best model weights based on validation accuracy
+    checkpoint = ModelCheckpoint(model_save_path, monitor='val_categorical_accuracy', verbose=1, save_best_only=True, mode='max')
+    # ReduceLROnPlateau: Reduces learning rate when validation accuracy stops improving
+    reduce_lr = ReduceLROnPlateau(monitor='val_categorical_accuracy', factor=0.5, patience=10, min_lr=0.00001, verbose=1)
+    # EarlyStopping: Stops training if validation accuracy doesn't improve for a set number of epochs
+    early_stopping = EarlyStopping(monitor='val_categorical_accuracy', patience=20, restore_best_weights=True, verbose=1)
+
+    callbacks = [checkpoint, reduce_lr, early_stopping]
+
+    # --- Train the Model ---
+    print("\nTraining model...")
+    history = model.fit(
+        X_train_reshaped, y_train,
+        epochs=100, # Max epochs, but early stopping will determine actual training duration
+        batch_size=32,
+        validation_data=(X_test_reshaped, y_test),
+        callbacks=callbacks
+    )
+
+    print(f"\nModel training complete. Best model saved to: {model_save_path}")
+
+
+# --- Section 4: Real-time Inference and Text-to-Speech Output ---
+# This code loads the trained model and uses it for real-time sign language
+# prediction from the webcam feed, displaying text and speaking the recognized signs.
+
+def run_realtime_translator(actions_list, model_path='sign_language_model.h5', sequence_length=30):
+    """
+    Runs the real-time sign language translator using a trained model.
+    Detects gestures from webcam and outputs recognized text and speech.
+
+    Args:
+        actions_list (list): List of strings, defining the actions/signs.
+                             MUST match the 'actions_to_collect' used in data collection and training.
+        model_path (str): Path to the saved Keras model file (.h5).
+        sequence_length (int): Number of frames in a sequence (from data collection/training).
+    """
+    print("\n--- Starting Real-Time Sign Language Translator ---")
+    print("Perform gestures in front of the camera. Recognized signs will appear.")
+    print("Press 'q' to quit at any time.")
+
+    # Initialize MediaPipe Hands
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5
+    )
+    mp_drawing = mp.solutions.drawing_utils
+
+    # Load the trained model
+    try:
+        model = load_model(model_path)
+        print(f"Successfully loaded model from: {model_path}")
+    except Exception as e:
+        print(f"Error loading model from {model_path}: {e}")
+        print("Please ensure you have trained the model and the path is correct.")
+        return
+
+    # Buffer to store sequences of landmark data for prediction
+    sequence_buffer = []
+    recognized_sentence = [] # Stores a sequence of recognized signs for display
+    prediction_confidence = [] # Stores confidence scores for debouncing
+    
+    # Threshold for a prediction to be considered valid and added to the sentence
+    prediction_threshold = 0.8 # Adjust based on your model's performance
+    
+    # Initialize pygame mixer for audio playback
+    # Pygame needs to be initialized before mixer, and mixer before playing sound.
+    pygame.mixer.init()
+
+    # Function to speak text using gTTS
+    def speak_text(text_to_speak):
+        if text_to_speak and not pygame.mixer.music.get_busy(): # Only speak if not already speaking
+            try:
+                tts = gTTS(text=text_to_speak, lang='en', slow=False)
+                tts_file = "temp_speech.mp3"
+                tts.save(tts_file)
+                pygame.mixer.music.load(tts_file)
+                pygame.mixer.music.play()
+                # You might add a small delay here or poll get_busy() in a separate thread
+                # to avoid blocking the main loop too much if audio is long.
+                # For short words, simple check is fine.
+            except Exception as e:
+                print(f"Error during TTS or audio playback for '{text_to_speak}': {e}")
+                print("Possible issues: No internet connection (gTTS), sound device problem, or invalid text.")
+                # Clean up temp file in case of error
+                if os.path.exists(tts_file):
+                    os.remove(tts_file)
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Error: Could not open video stream. Please check webcam connection.")
+        pygame.mixer.quit()
+        return
+
+    last_spoken_time = time.time()
+    speaking_cooldown = 1.5 # seconds between speaking the same word again
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame during real-time inference.")
+            break
+
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb_frame)
+
+        keypoints = []
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                for lm in hand_landmarks.landmark:
+                    keypoints.extend([lm.x, lm.y, lm.z])
+        else:
+            keypoints = list(np.zeros(21 * 3)) # Fill with zeros if no hand detected
+
+        # Add current frame's keypoints to the circular buffer
+        sequence_buffer.append(keypoints)
+        sequence_buffer = sequence_buffer[-sequence_length:] # Keep only the most recent 'sequence_length' frames
+
+        # Only make a prediction when the buffer is full
+        if len(sequence_buffer) == sequence_length:
+            # Reshape input for the model: (1, sequence_length, num_features, 1 channel)
+            input_data = np.expand_dims(np.expand_dims(np.array(sequence_buffer), axis=0), axis=-1)
+            
+            # Get model prediction
+            raw_prediction = model.predict(input_data, verbose=0)[0]
+            predicted_class_index = np.argmax(raw_prediction)
+            confidence = raw_prediction[predicted_class_index]
+
+            # Store recent confidence for debouncing/smoothing
+            prediction_confidence.append(confidence)
+            prediction_confidence = prediction_confidence[-5:] # Keep last 5 confidences
+
+            # Calculate average confidence over a short window
+            avg_confidence = np.mean(prediction_confidence)
+
+            # If average confidence is high enough and the predicted action is new or after cooldown
+            if avg_confidence > prediction_threshold:
+                predicted_action = actions_list[predicted_class_index]
+                
+                # Debounce logic: prevent repeating the same word too quickly
+                current_time = time.time()
+                if len(recognized_sentence) == 0 or \
+                   (predicted_action != recognized_sentence[-1] or \
+                   (current_time - last_spoken_time > speaking_cooldown and predicted_action == recognized_sentence[-1])):
+                    
+                    recognized_sentence.append(predicted_action)
+                    print(f"Recognized: {predicted_action} (Avg. Confidence: {avg_confidence:.2f})")
+                    speak_text(predicted_action)
+                    last_spoken_time = current_time # Update last spoken time
+
+
+        # Keep the displayed sentence manageable (e.g., last 5 words)
+        if len(recognized_sentence) > 5:
+            recognized_sentence = recognized_sentence[-5:]
+
+        # Display the recognized sentence on the frame
+        cv2.putText(frame, ' '.join(recognized_sentence), (10, frame.shape[0] - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        # Display current confidence for debugging
+        cv2.putText(frame, f'Conf: {avg_confidence:.2f}', (frame.shape[1] - 150, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2, cv2.LINE_AA)
+
+        cv2.imshow('Sign Language Translator (Live)', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+    hands.close()
+    pygame.mixer.quit()
+    print("--- Real-Time Translator Session Ended ---")
+
+# --- Main Execution Flow ---
+if __name__ == '__main__':
+    # Define the sign language actions you want to recognize
+    # Start with a few distinct signs for initial testing
+    # Example:
+    my_actions = ['hello', 'thank you', 'yes', 'no', 'please', 'i love you'] # Add more as needed!
+
+    # Define parameters for data collection and model training
+    num_sequences = 30  # Number of times to perform each sign (e.g., 30 video clips per sign)
+    sequence_length = 30 # Number of frames to capture for each sign (fixed time window)
+    model_file_name = 'sign_language_model.h5'
+
+    # --- Step 1: Run Hand Detection (Optional, for visual check) ---
+    # run_hand_detection()
+    # input("Press Enter to start data collection...") # Pause before next step
+
+    # --- Step 2: Collect Data for your signs ---
+    # Ensure you are ready to perform the gestures when prompted.
+    # This will create 'MP_Data' directory with subfolders for each sign.
+    collect_sign_language_data(my_actions, num_sequences, sequence_length)
+    # input("Data collection complete. Press Enter to start model training...") # Pause before next step
+
+    # --- Step 3: Train the Deep Learning Model ---
+    # This will train the CNN-LSTM model on the collected data.
+    # The best performing model will be saved as 'sign_language_model.h5'.
+    train_sign_language_model(my_actions, model_file_name, num_sequences, sequence_length)
+    # input("Model training complete. Press Enter to start real-time translation...") # Pause before next step
+
+    # --- Step 4: Run the Real-Time Translator ---
+    # This will load the trained model and attempt to recognize gestures in real-time.
+    # Make sure 'sign_language_model.h5' exists after training.
+    run_realtime_translator(my_actions, model_file_name, sequence_length)
+
